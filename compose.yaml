@@ -1,0 +1,41 @@
+name: spacedb-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spacedb-postgres
+    environment:
+      POSTGRES_USER: spacedb
+      POSTGRES_PASSWORD: spacedb
+      POSTGRES_DB: spacedb
+    ports:
+      - "55432:5432"
+    volumes:
+      - spacedb-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spacedb -d spacedb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    image: mariadb:11
+    container_name: spacedb-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: spacedb
+      MARIADB_USER: spacedb
+      MARIADB_PASSWORD: spacedb
+      MARIADB_DATABASE: spacedb
+    ports:
+      - "53306:3306"
+    volumes:
+      - spacedb-mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  spacedb-postgres:
+  spacedb-mariadb:
