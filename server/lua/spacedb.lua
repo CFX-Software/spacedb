@@ -21,27 +21,20 @@ local function startCore()
 
     local binary = GetConvar('spacedb_core_path', '')
     if binary == '' then
-        local suffix = package.config:sub(1, 1) == '\\' and '.exe' or ''
-        binary = resourcePath('bin/spacedb-core' .. suffix)
-    end
-
-    if not io.open(binary, 'r') then
-        print(('[spacedb] core binary not found at %s; build core/cmd/spacedb-core first'):format(binary))
-        return
+        binary = resourcePath('bin/spacedb-core.exe')
     end
 
     local configPath = resourcePath('config.json')
-    if not io.open(configPath, 'r') then
+    if not LoadResourceFile(resourceName, 'config.json') then
         configPath = resourcePath('config.example.json')
     end
 
-    local isWindows = package.config:sub(1, 1) == '\\'
-    local command
-    if isWindows then
-        command = ('start "" /B "%s" -config "%s"'):format(binary, configPath)
-    else
+    local command = ('start "" /B "%s" -config "%s"'):format(binary, configPath)
+    if GetConvar('spacedb_core_platform', 'windows') == 'linux' then
+        binary = GetConvar('spacedb_core_path', resourcePath('bin/spacedb-core'))
         command = ('"%s" -config "%s" >/dev/null 2>&1 &'):format(binary, configPath)
     end
+
     os.execute(command)
 end
 
