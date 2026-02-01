@@ -1,0 +1,13 @@
+config.json
+.env
+.env.*
+!.env.example
+bin/
+core/spacedb-core
+core/spacedb-core.exe
+*.log
+tmp/
+tmp-*
+data/
+.DS_Store
+Thumbs.db
