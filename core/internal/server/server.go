@@ -26,9 +26,9 @@ type queryRequest struct {
 }
 
 type prepareRequest struct {
-	Name string                 `json:"name"`
-	SQL  string                 `json:"sql"`
-	Opts map[string]interface{} `json:"options"`
+	Name string      `json:"name"`
+	SQL  string      `json:"sql"`
+	Opts interface{} `json:"options"`
 }
 
 type transactionRequest struct {
