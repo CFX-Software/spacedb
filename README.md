@@ -68,3 +68,26 @@ local tx = exports.spacedb:transaction({
 ## Notes
 
 `config.json` and `bin` are ignored on purpose. Local database passwords, generated binaries, logs, and machine setup should not be committed.
+
+## Compatibility
+
+`compat/oxmysql` contains an OxMySQL style adapter resource. It forwards common exports to `spacedb`:
+
+```lua
+exports.oxmysql:query('SELECT 1 AS ok', {}, function(rows)
+    print(json.encode(rows))
+end)
+```
+
+To test it as a drop in replacement, copy `compat/oxmysql` to a resource folder named `oxmysql`, then ensure it after `spacedb`.
+
+```cfg
+ensure spacedb
+ensure oxmysql
+```
+
+The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, and `transaction`.
+
+## Tests
+
+`examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
