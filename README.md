@@ -71,19 +71,19 @@ local tx = exports.spacedb:transaction({
 
 ## Compatibility
 
-`compat/oxmysql` contains an OxMySQL style adapter resource. It forwards common exports to `spacedb`:
+`compat/spacedb-oxmysql` contains an OxMySQL style adapter resource. It forwards common exports to `spacedb` without taking the real `oxmysql` resource name:
 
 ```lua
-exports.oxmysql:query('SELECT 1 AS ok', {}, function(rows)
+exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {}, function(rows)
     print(json.encode(rows))
 end)
 ```
 
-To test it as a drop in replacement, copy `compat/oxmysql` to a resource folder named `oxmysql`, then ensure it after `spacedb`.
+To test it locally, copy `compat/spacedb-oxmysql` into your resources folder, then ensure it after `spacedb`.
 
 ```cfg
 ensure spacedb
-ensure oxmysql
+ensure spacedb-oxmysql
 ```
 
 The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, and `transaction`.
@@ -92,4 +92,4 @@ The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `
 
 `examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
 
-`examples/spacedb-bench` is a simple in-game benchmark resource. It compares native `spacedb` exports against the OxMySQL compatibility adapter for sequential queries, concurrent queries, and inserts.
+`examples/spacedb-bench` is a simple in-game benchmark resource. It compares native `spacedb` exports against the `spacedb-oxmysql` compatibility adapter for sequential queries, concurrent queries, and inserts.
