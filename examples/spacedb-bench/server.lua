@@ -1,0 +1,115 @@
+local iterations = tonumber(GetConvar('spacedb_bench_iterations', '1000')) or 1000
+local concurrency = tonumber(GetConvar('spacedb_bench_concurrency', '50')) or 50
+
+local function log(message)
+    print(('[spacedb-bench] %s'):format(message))
+end
+
+local function now()
+    return GetGameTimer()
+end
+
+local function elapsed(start)
+    return now() - start
+end
+
+local function round(value)
+    return math.floor(value * 100 + 0.5) / 100
+end
+
+local function report(name, count, durationMs)
+    local perQuery = durationMs / count
+    local qps = count / (durationMs / 1000)
+    log(('%s count=%d totalMs=%d avgMs=%s qps=%s'):format(name, count, durationMs, round(perQuery), round(qps)))
+end
+
+local function runSequential(name, fn)
+    collectgarbage('collect')
+    local start = now()
+    for _ = 1, iterations do
+        fn()
+    end
+    report(name, iterations, elapsed(start))
+end
+
+local function runConcurrent(name, fn)
+    collectgarbage('collect')
+    local completed = 0
+    local start = now()
+
+    for _ = 1, concurrency do
+        CreateThread(function()
+            local perWorker = math.floor(iterations / concurrency)
+            for _ = 1, perWorker do
+                fn()
+            end
+            completed = completed + 1
+        end)
+    end
+
+    local deadline = now() + 60000
+    while completed < concurrency and now() < deadline do
+        Wait(0)
+    end
+
+    local count = math.floor(iterations / concurrency) * concurrency
+    report(name, count, elapsed(start))
+end
+
+local function setup()
+    local health = exports.spacedb:health()
+    exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
+    if health.driver == 'mysql' or health.driver == 'mariadb' then
+        exports.spacedb:execute([[
+            CREATE TABLE spacedb_bench_items (
+                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                name TEXT NOT NULL,
+                score INTEGER NOT NULL DEFAULT 0
+            )
+        ]], {})
+        return
+    end
+
+    exports.spacedb:execute([[
+        CREATE TABLE spacedb_bench_items (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0
+        )
+    ]], {})
+end
+
+local function run()
+    Wait(2500)
+    log(('starting iterations=%d concurrency=%d'):format(iterations, concurrency))
+    setup()
+
+    runSequential('spacedb query sequential', function()
+        exports.spacedb:query('SELECT 1 AS ok', {})
+    end)
+
+    runSequential('oxmysql query sequential', function()
+        exports.oxmysql:query('SELECT 1 AS ok', {})
+    end)
+
+    runConcurrent('spacedb query concurrent', function()
+        exports.spacedb:query('SELECT 1 AS ok', {})
+    end)
+
+    runConcurrent('oxmysql query concurrent', function()
+        exports.oxmysql:query('SELECT 1 AS ok', {})
+    end)
+
+    runSequential('spacedb insert sequential', function()
+        exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native', 1 })
+    end)
+
+    runSequential('oxmysql insert sequential', function()
+        exports.oxmysql:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'compat', 1 })
+    end)
+
+    exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
+    log('finished')
+end
+
+CreateThread(run)
