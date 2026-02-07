@@ -2,7 +2,7 @@ fx_version 'cerulean'
 game 'gta5'
 
 author 'Inkwell'
-description 'OxMySQL compatibility adapter for spacedb'
+description 'spacedb OxMySQL compatibility adapter'
 version '0.1.0'
 
 dependency 'spacedb'

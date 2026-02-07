@@ -89,7 +89,7 @@ local function run()
     end)
 
     runSequential('oxmysql query sequential', function()
-        exports.oxmysql:query('SELECT 1 AS ok', {})
+        exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {})
     end)
 
     runConcurrent('spacedb query concurrent', function()
@@ -97,7 +97,7 @@ local function run()
     end)
 
     runConcurrent('oxmysql query concurrent', function()
-        exports.oxmysql:query('SELECT 1 AS ok', {})
+        exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {})
     end)
 
     runSequential('spacedb insert sequential', function()
@@ -105,7 +105,7 @@ local function run()
     end)
 
     runSequential('oxmysql insert sequential', function()
-        exports.oxmysql:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'compat', 1 })
+        exports['spacedb-oxmysql']:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'compat', 1 })
     end)
 
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
