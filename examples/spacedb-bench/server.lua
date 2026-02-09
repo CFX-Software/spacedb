@@ -25,30 +25,44 @@ end
 
 local function runSequential(name, fn)
     collectgarbage('collect')
+    log(('phase started %s'):format(name))
     local start = now()
-    for _ = 1, iterations do
+    for i = 1, iterations do
         fn()
+        if i % 100 == 0 then
+            log(('%s progress=%d/%d'):format(name, i, iterations))
+            Wait(0)
+        end
     end
     report(name, iterations, elapsed(start))
 end
 
 local function runConcurrent(name, fn)
     collectgarbage('collect')
+    log(('phase started %s'):format(name))
     local completed = 0
     local start = now()
 
     for _ = 1, concurrency do
         CreateThread(function()
             local perWorker = math.floor(iterations / concurrency)
-            for _ = 1, perWorker do
+            for i = 1, perWorker do
                 fn()
+                if i % 25 == 0 then
+                    Wait(0)
+                end
             end
             completed = completed + 1
         end)
     end
 
     local deadline = now() + 60000
+    local lastLogged = -1
     while completed < concurrency and now() < deadline do
+        if completed > 0 and completed % 10 == 0 and completed ~= lastLogged then
+            log(('%s workersComplete=%d/%d'):format(name, completed, concurrency))
+            lastLogged = completed
+        end
         Wait(0)
     end
 
@@ -88,24 +102,24 @@ local function run()
         exports.spacedb:query('SELECT 1 AS ok', {})
     end)
 
-    runSequential('oxmysql query sequential', function()
-        exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {})
+    runSequential('oxmysql real query sequential', function()
+        exports.oxmysql:query('SELECT 1 AS ok', {})
     end)
 
     runConcurrent('spacedb query concurrent', function()
         exports.spacedb:query('SELECT 1 AS ok', {})
     end)
 
-    runConcurrent('oxmysql query concurrent', function()
-        exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {})
+    runConcurrent('oxmysql real query concurrent', function()
+        exports.oxmysql:query('SELECT 1 AS ok', {})
     end)
 
     runSequential('spacedb insert sequential', function()
         exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native', 1 })
     end)
 
-    runSequential('oxmysql insert sequential', function()
-        exports['spacedb-oxmysql']:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'compat', 1 })
+    runSequential('oxmysql real insert sequential', function()
+        exports.oxmysql:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })
     end)
 
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
