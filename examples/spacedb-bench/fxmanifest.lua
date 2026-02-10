@@ -7,7 +7,7 @@ version '0.1.0'
 
 dependencies {
     'spacedb',
-    'spacedb-oxmysql'
+    'oxmysql'
 }
 
 server_script 'server.lua'

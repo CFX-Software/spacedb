@@ -92,4 +92,4 @@ The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `
 
 `examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
 
-`examples/spacedb-bench` is a simple in-game benchmark resource. It compares native `spacedb` exports against the `spacedb-oxmysql` compatibility adapter for sequential queries, concurrent queries, and inserts.
+`examples/spacedb-bench` is a simple in-game benchmark resource. It compares native `spacedb` exports against the real `oxmysql` resource for sequential queries, concurrent queries, and inserts.
