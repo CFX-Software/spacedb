@@ -8,9 +8,14 @@ import (
 )
 
 type Config struct {
-	Listen   string         `json:"listen"`
-	Database DatabaseConfig `json:"database"`
-	Realtime RealtimeConfig `json:"realtime"`
+	Listen    string          `json:"listen"`
+	Transport TransportConfig `json:"transport"`
+	Database  DatabaseConfig  `json:"database"`
+	Realtime  RealtimeConfig  `json:"realtime"`
+}
+
+type TransportConfig struct {
+	Listen string `json:"listen"`
 }
 
 type DatabaseConfig struct {
@@ -45,6 +50,9 @@ func Load(path string) (Config, error) {
 func (c *Config) Defaults() {
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:37120"
+	}
+	if c.Transport.Listen == "" {
+		c.Transport.Listen = "127.0.0.1:37121"
 	}
 	if c.Database.MaxOpenConns == 0 {
 		c.Database.MaxOpenConns = 32

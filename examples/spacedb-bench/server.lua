@@ -23,6 +23,14 @@ local function report(name, count, durationMs)
     log(('%s count=%d totalMs=%d avgMs=%s qps=%s'):format(name, count, durationMs, round(perQuery), round(qps)))
 end
 
+local function awaitOxmysql(method, sql, params)
+    local p = promise.new()
+    exports.oxmysql[method](exports.oxmysql, sql, params or {}, function(result)
+        p:resolve(result)
+    end)
+    return Citizen.Await(p)
+end
+
 local function runSequential(name, fn)
     collectgarbage('collect')
     log(('phase started %s'):format(name))
@@ -103,7 +111,7 @@ local function run()
     end)
 
     runSequential('oxmysql real query sequential', function()
-        exports.oxmysql:query('SELECT 1 AS ok', {})
+        awaitOxmysql('query', 'SELECT 1 AS ok', {})
     end)
 
     runConcurrent('spacedb query concurrent', function()
@@ -111,7 +119,7 @@ local function run()
     end)
 
     runConcurrent('oxmysql real query concurrent', function()
-        exports.oxmysql:query('SELECT 1 AS ok', {})
+        awaitOxmysql('query', 'SELECT 1 AS ok', {})
     end)
 
     runSequential('spacedb insert sequential', function()
@@ -119,7 +127,15 @@ local function run()
     end)
 
     runSequential('oxmysql real insert sequential', function()
-        exports.oxmysql:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })
+        awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })
+    end)
+
+    runConcurrent('spacedb insert concurrent', function()
+        exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native-concurrent', 1 })
+    end)
+
+    runConcurrent('oxmysql real insert concurrent', function()
+        awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real-concurrent', 1 })
     end)
 
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
