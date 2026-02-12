@@ -4,6 +4,8 @@ spacedb is a fast database resource for FiveM servers.
 
 It runs a small Go service beside the FiveM resource and gives server scripts a simple export API for queries, writes, transactions, metrics, and live query subscriptions.
 
+The runtime path uses a persistent local TCP transport for query calls. HTTP stays available for health checks, stats, subscriptions, and debugging.
+
 The first target is a clean native API. Compatibility layers for older resources such as OxMySQL and mysql async belong in the next pass once the core behavior is stable.
 
 ## Local setup
@@ -35,12 +37,12 @@ ensure spacedb
 
 ## Databases
 
-The local `config.json` uses Postgres on port `55432`.
+The local `config.json` uses MariaDB on port `53306`.
 
-MariaDB also starts on port `53306`. To test it, set the driver to `mysql` and use this DSN.
+Postgres also starts on port `55432`. To test it, set the driver to `postgres` and use this DSN.
 
 ```text
-spacedb:spacedb@tcp(127.0.0.1:53306)/spacedb?parseTime=true
+postgres://spacedb:spacedb@127.0.0.1:55432/spacedb?sslmode=disable
 ```
 
 ## Exports
