@@ -20,6 +20,8 @@ type Store struct {
 	cfg     config.Config
 	mu      sync.RWMutex
 	queries map[string]string
+	stmtMu  sync.RWMutex
+	stmts   map[string]*sql.Stmt
 }
 
 type ExecResult struct {
@@ -63,10 +65,15 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{sqlDB: sqlDB, cfg: cfg, queries: map[string]string{}}, nil
+	return &Store{sqlDB: sqlDB, cfg: cfg, queries: map[string]string{}, stmts: map[string]*sql.Stmt{}}, nil
 }
 
 func (s *Store) Close() error {
+	s.stmtMu.Lock()
+	for _, stmt := range s.stmts {
+		_ = stmt.Close()
+	}
+	s.stmtMu.Unlock()
 	return s.sqlDB.Close()
 }
 
@@ -94,7 +101,11 @@ func (s *Store) resolve(query string) string {
 
 func (s *Store) Query(ctx context.Context, query string, params []interface{}) ([]map[string]interface{}, time.Duration, error) {
 	start := time.Now()
-	rows, err := s.sqlDB.QueryContext(ctx, s.resolve(query), params...)
+	stmt, err := s.statement(ctx, query)
+	if err != nil {
+		return nil, time.Since(start), err
+	}
+	rows, err := stmt.QueryContext(ctx, params...)
 	if err != nil {
 		return nil, time.Since(start), err
 	}
@@ -114,7 +125,11 @@ func (s *Store) Single(ctx context.Context, query string, params []interface{}) 
 
 func (s *Store) Execute(ctx context.Context, query string, params []interface{}) (ExecResult, time.Duration, error) {
 	start := time.Now()
-	result, err := s.sqlDB.ExecContext(ctx, s.resolve(query), params...)
+	stmt, err := s.statement(ctx, query)
+	if err != nil {
+		return ExecResult{}, time.Since(start), err
+	}
+	result, err := stmt.ExecContext(ctx, params...)
 	dur := time.Since(start)
 	if err != nil {
 		return ExecResult{}, dur, err
@@ -173,11 +188,39 @@ func (s *Store) Transaction(ctx context.Context, steps []Step) ([]StepResult, ti
 	return results, time.Since(start), nil
 }
 
+func (s *Store) statement(ctx context.Context, query string) (*sql.Stmt, error) {
+	sqlText := s.resolve(query)
+
+	s.stmtMu.RLock()
+	stmt, ok := s.stmts[sqlText]
+	s.stmtMu.RUnlock()
+	if ok {
+		return stmt, nil
+	}
+
+	prepared, err := s.sqlDB.PrepareContext(ctx, sqlText)
+	if err != nil {
+		return nil, err
+	}
+
+	s.stmtMu.Lock()
+	defer s.stmtMu.Unlock()
+	if existing, ok := s.stmts[sqlText]; ok {
+		_ = prepared.Close()
+		return existing, nil
+	}
+	s.stmts[sqlText] = prepared
+	return prepared, nil
+}
+
 func (s *Store) Stats() map[string]interface{} {
 	stats := s.sqlDB.Stats()
 	s.mu.RLock()
 	prepared := len(s.queries)
 	s.mu.RUnlock()
+	s.stmtMu.RLock()
+	cachedStatements := len(s.stmts)
+	s.stmtMu.RUnlock()
 	return map[string]interface{}{
 		"maxOpenConnections": stats.MaxOpenConnections,
 		"openConnections":    stats.OpenConnections,
@@ -189,6 +232,7 @@ func (s *Store) Stats() map[string]interface{} {
 		"maxIdleTimeClosed":  stats.MaxIdleTimeClosed,
 		"maxLifetimeClosed":  stats.MaxLifetimeClosed,
 		"preparedQueries":    prepared,
+		"cachedStatements":   cachedStatements,
 	}
 }
 

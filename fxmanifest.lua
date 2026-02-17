@@ -6,7 +6,8 @@ description 'spacedb - high-performance database bridge for FiveM'
 version '0.1.0'
 
 server_scripts {
-    'server/lua/spacedb.lua'
+    'server/lua/spacedb.lua',
+    'server/js/spacedb.js'
 }
 
 files {

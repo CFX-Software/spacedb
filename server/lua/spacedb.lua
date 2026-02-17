@@ -1,7 +1,5 @@
 local resourceName = GetCurrentResourceName()
 local endpoint = GetConvar('spacedb_endpoint', 'http://127.0.0.1:37120')
-local subscriptions = {}
-
 local function resourcePath(path)
     return GetResourcePath(resourceName) .. '/' .. path
 end
@@ -29,16 +27,18 @@ local function startCore()
         configPath = resourcePath('config.example.json')
     end
 
-    local command = ('start "" /B "%s" -config "%s"'):format(binary, configPath)
+    local command = ('cmd /c start "" /B "%s" -config "%s"'):format(binary, configPath)
     if GetConvar('spacedb_core_platform', 'windows') == 'linux' then
         binary = GetConvar('spacedb_core_path', resourcePath('bin/spacedb-core'))
         command = ('"%s" -config "%s" >/dev/null 2>&1 &'):format(binary, configPath)
     end
 
-    os.execute(command)
+    local ok, reason, code = os.execute(command)
+    print(('[spacedb] core start command dispatched ok=%s reason=%s code=%s'):format(tostring(ok), tostring(reason), tostring(code)))
 end
 
-local function request(method, path, body, cb)
+local function request(method, path, body, cb, attempt)
+    attempt = attempt or 1
     local payload = body and json.encode(body) or ''
     PerformHttpRequest(endpoint .. path, function(status, response)
         local decoded = nil
@@ -48,6 +48,14 @@ local function request(method, path, body, cb)
         end
 
         if status < 200 or status >= 300 then
+            if status == 0 and attempt < 25 then
+                CreateThread(function()
+                    Wait(200)
+                    request(method, path, body, cb, attempt + 1)
+                end)
+                return
+            end
+
             local err = decoded and decoded.error or ('HTTP ' .. tostring(status))
             cb(nil, err)
             return
@@ -64,102 +72,19 @@ local function request(method, path, body, cb)
     })
 end
 
-local function call(method, path, body, cb)
-    if cb then
-        request(method, path, body, cb)
-        return nil
-    end
-
-    local p = promise.new()
-    request(method, path, body, function(result, err)
-        if err then
-            p:reject(err)
-        else
-            p:resolve(result)
-        end
-    end)
-    return Citizen.Await(p)
-end
-
-local function query(sqlOrName, params, cb)
-    return call('POST', '/v1/query', { query = sqlOrName, params = params or {} }, cb)
-end
-
-local function single(sqlOrName, params, cb)
-    return call('POST', '/v1/single', { query = sqlOrName, params = params or {} }, cb)
-end
-
-local function execute(sqlOrName, params, cb)
-    return call('POST', '/v1/execute', { query = sqlOrName, params = params or {} }, cb)
-end
-
-local function prepare(name, sql, options, cb)
-    return call('POST', '/v1/prepare', { name = name, sql = sql, options = options or {} }, cb)
-end
-
-local function transaction(steps, cb)
-    return call('POST', '/v1/transaction', { steps = steps or {} }, cb)
-end
-
-local function pollSubscription(id, callback)
-    CreateThread(function()
-        while subscriptions[id] do
-            request('GET', '/v1/events?id=' .. id, nil, function(result, err)
-                if not err and result and result.events then
-                    for _, event in ipairs(result.events) do
-                        callback(event)
-                    end
-                end
-            end)
-            Wait(250)
-        end
-    end)
-end
-
-local function subscribe(sqlOrName, params, callback)
-    local result = call('POST', '/v1/subscribe', { query = sqlOrName, params = params or {} })
-    if result and result.id then
-        subscriptions[result.id] = true
-        if callback then
-            pollSubscription(result.id, callback)
-        end
-    end
-    return result
-end
-
-local function unsubscribe(id, cb)
-    subscriptions[id] = nil
-    return call('POST', '/v1/unsubscribe', { id = id }, cb)
-end
-
-local function health(cb)
-    return call('GET', '/health', nil, cb)
-end
-
-local function stats(cb)
-    return call('GET', '/v1/stats', nil, cb)
-end
-
-exports('query', query)
-exports('single', single)
-exports('execute', execute)
-exports('prepare', prepare)
-exports('transaction', transaction)
-exports('subscribe', subscribe)
-exports('unsubscribe', unsubscribe)
-exports('health', health)
-exports('stats', stats)
-
 CreateThread(function()
     startCore()
-    Wait(500)
     local cfg = readConfig()
-    print(('[spacedb] resource ready; config bytes=%d endpoint=%s'):format(#cfg, endpoint))
+    request('GET', '/health', nil, function(result, err)
+        if err then
+            print(('[spacedb] core not reachable after startup: %s endpoint=%s'):format(err, endpoint))
+            return
+        end
+
+        print(('[spacedb] core ready driver=%s config bytes=%d endpoint=%s'):format(result.driver or 'unknown', #cfg, endpoint))
+    end)
 end)
 
 AddEventHandler('onResourceStop', function(stopped)
     if stopped ~= resourceName then return end
-    for id in pairs(subscriptions) do
-        request('POST', '/v1/unsubscribe', { id = id }, function() end)
-    end
 end)

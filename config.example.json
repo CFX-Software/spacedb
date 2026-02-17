@@ -1,5 +1,8 @@
 {
   "listen": "127.0.0.1:37120",
+  "transport": {
+    "listen": "127.0.0.1:37121"
+  },
   "database": {
     "driver": "postgres",
     "dsn": "postgres://user:password@127.0.0.1:5432/database?sslmode=disable",
