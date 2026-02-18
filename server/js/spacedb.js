@@ -133,6 +133,11 @@ function execute(sqlOrName, params = []) {
   return transport('execute', { query: sqlOrName, params });
 }
 
+function executeMany(sqlOrName, rows = []) {
+  const steps = rows.map((params) => ({ query: sqlOrName, params, mode: 'execute' }));
+  return transaction(steps);
+}
+
 function prepare(name, sql, options = {}) {
   return transport('prepare', { name, sql, options });
 }
@@ -175,6 +180,7 @@ function stats() {
 exports('query', query);
 exports('single', single);
 exports('execute', execute);
+exports('executeMany', executeMany);
 exports('prepare', prepare);
 exports('transaction', transaction);
 exports('subscribe', subscribe);

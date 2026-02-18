@@ -61,6 +61,14 @@ local result = exports.spacedb:execute('UPDATE users SET name = ? WHERE id = ?',
 ```
 
 ```lua
+local batch = exports.spacedb:executeMany('INSERT INTO users (name) VALUES (?)', {
+    { 'Jane' },
+    { 'Alex' },
+    { 'Sam' }
+})
+```
+
+```lua
 local tx = exports.spacedb:transaction({
     { mode = 'execute', query = 'INSERT INTO users (name) VALUES (?)', params = { 'Jane' } },
     { mode = 'query', query = 'SELECT * FROM users', params = {} }

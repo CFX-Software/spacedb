@@ -78,6 +78,14 @@ local function runConcurrent(name, fn)
     report(name, count, elapsed(start))
 end
 
+local function runBatch(name, fn, count)
+    collectgarbage('collect')
+    log(('phase started %s'):format(name))
+    local start = now()
+    fn()
+    report(name, count, elapsed(start))
+end
+
 local function setup()
     local health = exports.spacedb:health()
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
@@ -129,6 +137,14 @@ local function run()
     runSequential('oxmysql real insert sequential', function()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })
     end)
+
+    runBatch('spacedb insert batch transaction', function()
+        local rows = {}
+        for i = 1, iterations do
+            rows[i] = { 'native-batch', 1 }
+        end
+        exports.spacedb:executeMany('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', rows)
+    end, iterations)
 
     runConcurrent('spacedb insert concurrent', function()
         exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native-concurrent', 1 })
