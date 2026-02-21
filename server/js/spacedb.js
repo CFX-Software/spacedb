@@ -134,8 +134,7 @@ function execute(sqlOrName, params = []) {
 }
 
 function executeMany(sqlOrName, rows = []) {
-  const steps = rows.map((params) => ({ query: sqlOrName, params, mode: 'execute' }));
-  return transaction(steps);
+  return transport('executeMany', { query: sqlOrName, rows });
 }
 
 function prepare(name, sql, options = {}) {

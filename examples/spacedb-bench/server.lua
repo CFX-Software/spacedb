@@ -31,6 +31,14 @@ local function awaitOxmysql(method, sql, params)
     return Citizen.Await(p)
 end
 
+local function awaitOxmysqlTransaction(queries)
+    local p = promise.new()
+    exports.oxmysql:transaction(queries, function(result)
+        p:resolve(result)
+    end)
+    return Citizen.Await(p)
+end
+
 local function runSequential(name, fn)
     collectgarbage('collect')
     log(('phase started %s'):format(name))
@@ -144,6 +152,17 @@ local function run()
             rows[i] = { 'native-batch', 1 }
         end
         exports.spacedb:executeMany('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', rows)
+    end, iterations)
+
+    runBatch('oxmysql real insert batch transaction', function()
+        local queries = {}
+        for i = 1, iterations do
+            queries[i] = {
+                query = 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)',
+                values = { 'real-batch', 1 }
+            }
+        end
+        awaitOxmysqlTransaction(queries)
     end, iterations)
 
     runConcurrent('spacedb insert concurrent', function()

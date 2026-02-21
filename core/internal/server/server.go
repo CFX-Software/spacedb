@@ -47,14 +47,15 @@ type subRequest struct {
 }
 
 type transportRequest struct {
-	ID     string        `json:"id"`
-	Op     string        `json:"op"`
-	SubID  string        `json:"subId"`
-	Query  string        `json:"query"`
-	Params []interface{} `json:"params"`
-	Name   string        `json:"name"`
-	SQL    string        `json:"sql"`
-	Steps  []db.Step     `json:"steps"`
+	ID     string          `json:"id"`
+	Op     string          `json:"op"`
+	SubID  string          `json:"subId"`
+	Query  string          `json:"query"`
+	Params []interface{}   `json:"params"`
+	Rows   [][]interface{} `json:"rows"`
+	Name   string          `json:"name"`
+	SQL    string          `json:"sql"`
+	Steps  []db.Step       `json:"steps"`
 }
 
 type transportResponse struct {
@@ -201,6 +202,8 @@ func (s *Server) dispatchTransport(ctx context.Context, req transportRequest) (i
 		return s.store.Single(ctx, req.Query, req.Params)
 	case "execute":
 		return s.store.Execute(ctx, req.Query, req.Params)
+	case "executeMany":
+		return s.store.ExecuteMany(ctx, req.Query, req.Rows)
 	case "prepare":
 		start := time.Now()
 		return map[string]interface{}{"ok": true, "name": req.Name}, time.Since(start), s.store.Prepare(req.Name, req.SQL)
