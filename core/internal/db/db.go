@@ -90,13 +90,17 @@ func (s *Store) Prepare(name, sqlText string) error {
 	return nil
 }
 
-func (s *Store) resolve(query string) string {
+func (s *Store) resolveRaw(query string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if prepared, ok := s.queries[query]; ok {
-		return s.rebind(prepared)
+		return prepared
 	}
-	return s.rebind(query)
+	return query
+}
+
+func (s *Store) resolve(query string) string {
+	return s.rebind(s.resolveRaw(query))
 }
 
 func (s *Store) Query(ctx context.Context, query string, params []interface{}) ([]map[string]interface{}, time.Duration, error) {
@@ -138,6 +142,71 @@ func (s *Store) Execute(ctx context.Context, query string, params []interface{})
 	rowsAffected, _ := result.RowsAffected()
 	lastInsertID, _ := result.LastInsertId()
 	return ExecResult{RowsAffected: rowsAffected, LastInsertID: lastInsertID}, dur, nil
+}
+
+func (s *Store) ExecuteMany(ctx context.Context, query string, rows [][]interface{}) (ExecResult, time.Duration, error) {
+	start := time.Now()
+	if len(rows) == 0 {
+		return ExecResult{}, time.Since(start), nil
+	}
+
+	rawSQL := s.resolveRaw(query)
+	builder, placeholders, ok := splitInsertValues(rawSQL)
+	if !ok {
+		return s.executeManyTransaction(ctx, query, rows, start)
+	}
+
+	total := ExecResult{}
+	for i := 0; i < len(rows); i += 500 {
+		end := i + 500
+		if end > len(rows) {
+			end = len(rows)
+		}
+
+		sqlText, params, err := builder(end - i)
+		if err != nil {
+			return ExecResult{}, time.Since(start), err
+		}
+		params = params[:0]
+		for _, row := range rows[i:end] {
+			if len(row) != placeholders {
+				return ExecResult{}, time.Since(start), fmt.Errorf("executeMany row has %d params, expected %d", len(row), placeholders)
+			}
+			params = append(params, row...)
+		}
+
+		result, err := s.sqlDB.ExecContext(ctx, s.rebind(sqlText), params...)
+		if err != nil {
+			return ExecResult{}, time.Since(start), err
+		}
+		affected, _ := result.RowsAffected()
+		lastID, _ := result.LastInsertId()
+		total.RowsAffected += affected
+		if total.LastInsertID == 0 {
+			total.LastInsertID = lastID
+		}
+	}
+
+	return total, time.Since(start), nil
+}
+
+func (s *Store) executeManyTransaction(ctx context.Context, query string, rows [][]interface{}, start time.Time) (ExecResult, time.Duration, error) {
+	steps := make([]Step, len(rows))
+	for i, params := range rows {
+		steps[i] = Step{Query: query, Params: params, Mode: "execute"}
+	}
+	results, dur, err := s.Transaction(ctx, steps)
+	if err != nil {
+		return ExecResult{}, dur, err
+	}
+	total := ExecResult{}
+	for _, result := range results {
+		total.RowsAffected += result.RowsAffected
+		if total.LastInsertID == 0 {
+			total.LastInsertID = result.LastInsertID
+		}
+	}
+	return total, time.Since(start), nil
 }
 
 func (s *Store) Transaction(ctx context.Context, steps []Step) ([]StepResult, time.Duration, error) {
@@ -186,6 +255,37 @@ func (s *Store) Transaction(ctx context.Context, steps []Step) ([]StepResult, ti
 		return nil, time.Since(start), err
 	}
 	return results, time.Since(start), nil
+}
+
+func splitInsertValues(sqlText string) (func(int) (string, []interface{}, error), int, bool) {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(sqlText, ";"))
+	lower := strings.ToLower(trimmed)
+	index := strings.LastIndex(lower, " values ")
+	if !strings.HasPrefix(strings.TrimSpace(lower), "insert ") || index < 0 {
+		return nil, 0, false
+	}
+
+	prefix := trimmed[:index+len(" values ")]
+	group := strings.TrimSpace(trimmed[index+len(" values "):])
+	if !strings.HasPrefix(group, "(") || !strings.HasSuffix(group, ")") {
+		return nil, 0, false
+	}
+
+	placeholders := strings.Count(group, "?")
+	if placeholders == 0 {
+		return nil, 0, false
+	}
+
+	return func(count int) (string, []interface{}, error) {
+		if count <= 0 {
+			return "", nil, errors.New("executeMany batch count must be positive")
+		}
+		groups := make([]string, count)
+		for i := range groups {
+			groups[i] = group
+		}
+		return prefix + strings.Join(groups, ","), make([]interface{}, 0, count*placeholders), nil
+	}, placeholders, true
 }
 
 func (s *Store) statement(ctx context.Context, query string) (*sql.Stmt, error) {
