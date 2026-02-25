@@ -94,6 +94,17 @@ local function runBatch(name, fn, count)
     report(name, count, elapsed(start))
 end
 
+local function buildBulkInsert(name, count)
+    local groups = {}
+    local params = {}
+    for i = 1, count do
+        groups[i] = '(?, ?)'
+        params[#params + 1] = name
+        params[#params + 1] = 1
+    end
+    return 'INSERT INTO spacedb_bench_items (name, score) VALUES ' .. table.concat(groups, ','), params
+end
+
 local function setup()
     local health = exports.spacedb:health()
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
@@ -146,10 +157,10 @@ local function run()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })
     end)
 
-    runBatch('spacedb insert batch transaction', function()
+    runBatch('spacedb insert bulk multi-row', function()
         local rows = {}
         for i = 1, iterations do
-            rows[i] = { 'native-batch', 1 }
+            rows[i] = { 'native-bulk', 1 }
         end
         exports.spacedb:executeMany('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', rows)
     end, iterations)
@@ -163,6 +174,15 @@ local function run()
             }
         end
         awaitOxmysqlTransaction(queries)
+    end, iterations)
+
+    runBatch('oxmysql real insert bulk multi-row', function()
+        for i = 1, iterations, 500 do
+            local remaining = iterations - i + 1
+            local count = math.min(500, remaining)
+            local sql, params = buildBulkInsert('real-bulk', count)
+            awaitOxmysql('execute', sql, params)
+        end
     end, iterations)
 
     runConcurrent('spacedb insert concurrent', function()
