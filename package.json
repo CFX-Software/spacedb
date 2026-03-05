@@ -1,0 +1,9 @@
+{
+  "name": "spacedb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "High-performance database bridge for FiveM",
+  "scripts": {
+    "test": "node --test server/js/protocol.test.js"
+  }
+}

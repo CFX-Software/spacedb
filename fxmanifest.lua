@@ -18,10 +18,13 @@ server_exports {
     'query',
     'single',
     'execute',
+    'executeMany',
     'prepare',
     'transaction',
     'subscribe',
     'unsubscribe',
     'health',
-    'stats'
+    'stats',
+    'executeProfiled',
+    'queryProfiled'
 }
