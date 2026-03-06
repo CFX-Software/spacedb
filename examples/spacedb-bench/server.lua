@@ -17,18 +17,46 @@ local function round(value)
     return math.floor(value * 100 + 0.5) / 100
 end
 
+-- Hi-res sample clock: os.clock() returns seconds with sub-ms resolution on
+-- most platforms. GetGameTimer() is ms-only and fine for wall clock but loses
+-- signal on fast calls.
+local function sampleNow()
+    return os.clock() * 1000
+end
+
+local function percentile(sorted, p)
+    local n = #sorted
+    if n == 0 then return 0 end
+    local idx = math.ceil(p * n)
+    if idx < 1 then idx = 1 end
+    if idx > n then idx = n end
+    return sorted[idx]
+end
+
 local results = {}
 
-local function report(name, count, durationMs)
+local function report(name, count, durationMs, samples)
     local perQuery = durationMs / count
     local qps = count / (durationMs / 1000)
-    results[name] = {
+    local entry = {
         count = count,
         totalMs = durationMs,
         avgMs = perQuery,
         qps = qps
     }
-    log(('%s count=%d totalMs=%d avgMs=%s qps=%s'):format(name, count, durationMs, round(perQuery), round(qps)))
+    if samples and #samples > 0 then
+        table.sort(samples)
+        entry.p50 = percentile(samples, 0.50)
+        entry.p95 = percentile(samples, 0.95)
+        entry.p99 = percentile(samples, 0.99)
+        entry.max = samples[#samples]
+        log(('%s count=%d totalMs=%d avgMs=%s qps=%s p50=%s p95=%s p99=%s max=%s'):format(
+            name, count, durationMs, round(perQuery), round(qps),
+            round(entry.p50), round(entry.p95), round(entry.p99), round(entry.max)))
+    else
+        log(('%s count=%d totalMs=%d avgMs=%s qps=%s'):format(name, count, durationMs, round(perQuery), round(qps)))
+    end
+    results[name] = entry
 end
 
 local function pad(value, width)
@@ -102,28 +130,34 @@ end
 local function runSequential(name, fn)
     collectgarbage('collect')
     log(('phase started %s'):format(name))
+    local samples = {}
     local start = now()
     for i = 1, iterations do
+        local s = sampleNow()
         fn()
+        samples[i] = sampleNow() - s
         if i % 100 == 0 then
             log(('%s progress=%d/%d'):format(name, i, iterations))
             Wait(0)
         end
     end
-    report(name, iterations, elapsed(start))
+    report(name, iterations, elapsed(start), samples)
 end
 
 local function runConcurrent(name, fn)
     collectgarbage('collect')
     log(('phase started %s'):format(name))
     local completed = 0
+    local samples = {}
     local start = now()
 
     for _ = 1, concurrency do
         CreateThread(function()
             local perWorker = math.floor(iterations / concurrency)
             for i = 1, perWorker do
+                local s = sampleNow()
                 fn()
+                samples[#samples + 1] = sampleNow() - s
                 if i % 25 == 0 then
                     Wait(0)
                 end
@@ -143,7 +177,7 @@ local function runConcurrent(name, fn)
     end
 
     local count = math.floor(iterations / concurrency) * concurrency
-    report(name, count, elapsed(start))
+    report(name, count, elapsed(start), samples)
 end
 
 local function runBatch(name, fn, count)
@@ -188,8 +222,24 @@ local function setup()
     ]], {})
 end
 
+local function waitForHealth(timeoutMs)
+    local deadline = now() + timeoutMs
+    while now() < deadline do
+        local ok, health = pcall(function() return exports.spacedb:health() end)
+        if ok and health and health.driver then
+            log(('core ready driver=%s'):format(health.driver))
+            return true
+        end
+        Wait(200)
+    end
+    return false
+end
+
 local function run()
-    Wait(2500)
+    if not waitForHealth(30000) then
+        log('FATAL core /health did not respond within 30s; aborting bench')
+        return
+    end
     log(('starting iterations=%d concurrency=%d'):format(iterations, concurrency))
     setup()
 
@@ -212,6 +262,77 @@ local function run()
     runSequential('spacedb insert sequential', function()
         exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native', 1 })
     end)
+
+    -- Profile phase: same sequential workload, but each call returns timing
+    -- breakdown. Lua total, JS bridge round trip, server total, DB exec, and
+    -- derived overheads. Identifies the dominant cost band per Step 1 plan.
+    do
+        collectgarbage('collect')
+        local name = 'spacedb insert sequential profile'
+        log(('phase started %s'):format(name))
+        local profIters = math.min(iterations, 500)
+        local luaTotal = {}
+        local bridge = {}
+        local serverTotal = {}
+        local serverDispatch = {}
+        local dbExec = {}
+        local start = now()
+        for i = 1, profIters do
+            local t0 = sampleNow()
+            local meta = exports.spacedb:executeProfiled(
+                'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)',
+                { 'native-profile', 1 }
+            )
+            local t1 = sampleNow()
+            luaTotal[i] = t1 - t0
+            if meta and meta.profile then
+                bridge[i] = (meta.bridgeNs or 0) / 1e6
+                serverTotal[i] = (meta.profile.serverTotalNs or 0) / 1e6
+                serverDispatch[i] = (meta.profile.dispatchNs or 0) / 1e6
+                dbExec[i] = (meta.profile.dbDurNs or 0) / 1e6
+            end
+            if i % 100 == 0 then
+                log(('%s progress=%d/%d'):format(name, i, profIters))
+                Wait(0)
+            end
+        end
+        local totalMs = elapsed(start)
+
+        local function describe(label, samples)
+            if #samples == 0 then
+                log(('  %-22s no samples'):format(label))
+                return
+            end
+            table.sort(samples)
+            local sum = 0
+            for _, v in ipairs(samples) do sum = sum + v end
+            local avg = sum / #samples
+            log(('  %-22s avg=%s p50=%s p95=%s p99=%s max=%s'):format(
+                label, round(avg),
+                round(percentile(samples, 0.50)),
+                round(percentile(samples, 0.95)),
+                round(percentile(samples, 0.99)),
+                round(samples[#samples])))
+        end
+
+        log(('%s count=%d totalMs=%d (per-stage ms)'):format(name, profIters, totalMs))
+        describe('lua-total', luaTotal)
+        describe('bridge-rtt', bridge)
+        describe('server-total', serverTotal)
+        describe('server-dispatch', serverDispatch)
+        describe('db-exec', dbExec)
+
+        -- Derived bands: where the time goes.
+        local function derive(a, b)
+            local n = math.min(#a, #b)
+            local out = {}
+            for i = 1, n do out[i] = math.max(0, a[i] - b[i]) end
+            return out
+        end
+        describe('derived: lua→jsBridge', derive(luaTotal, bridge))
+        describe('derived: jsBridge→server', derive(bridge, serverTotal))
+        describe('derived: server→db', derive(serverTotal, dbExec))
+    end
 
     runSequential('oxmysql real insert sequential', function()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real', 1 })

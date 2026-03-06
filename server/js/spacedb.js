@@ -1,18 +1,60 @@
 const net = require('net');
+const path = require('path');
+const { parseAddress, consumeFrames, createPendingMap } = require('./server/js/protocol');
+const { ensureCore } = require('./server/js/lifecycle');
 
 const endpoint = GetConvar('spacedb_endpoint', 'http://127.0.0.1:37120');
 const transportEndpoint = GetConvar('spacedb_transport', '127.0.0.1:37121');
+const requestTimeoutMs = Number(GetConvar('spacedb_request_timeout_ms', '30000')) || 30000;
+const manageCore = GetConvar('spacedb_manage_core', 'true') === 'true';
+const coreMode = GetConvar('spacedb_core_mode', 'restart'); // 'restart' | 'reuse'
+const resourceName = GetCurrentResourceName();
+const resourceRoot = GetResourcePath(resourceName);
 const subscriptions = new Set();
+const pending = createPendingMap();
 let nextId = 0;
 let socket = null;
 let buffer = '';
 let connecting = null;
-const pending = new Map();
+let coreReady = null;
 
-function parseAddress(value) {
-  const [host, port] = value.split(':');
-  return { host: host || '127.0.0.1', port: Number(port || 37121) };
+function bootCore() {
+  if (!manageCore) {
+    coreReady = Promise.resolve({ skipped: true });
+    return;
+  }
+  const isWindows = process.platform === 'win32';
+  const binaryConvar = GetConvar('spacedb_core_path', '');
+  const binary = binaryConvar !== ''
+    ? binaryConvar
+    : path.join(resourceRoot, 'bin', isWindows ? 'spacedb-core.exe' : 'spacedb-core');
+  const config = path.join(resourceRoot, 'config.json');
+  const logPath = path.join(resourceRoot, 'spacedb-core.log');
+  const transportAddr = parseAddress(transportEndpoint);
+
+  coreReady = ensureCore({
+    endpoint,
+    transportPort: String(transportAddr.port),
+    binary,
+    config,
+    logPath,
+    mode: coreMode,
+  }).then((result) => {
+    if (result.reused && result.killFailed) {
+      console.log(`[spacedb] could not kill stale core (different session?); reusing existing driver=${result.driver}`);
+    } else if (result.reused) {
+      console.log(`[spacedb] reusing existing core driver=${result.driver}`);
+    } else {
+      console.log(`[spacedb] core ready driver=${result.driver} pid=${result.pid} endpoint=${endpoint}`);
+    }
+    return result;
+  }).catch((err) => {
+    console.log(`[spacedb] FATAL core failed to start: ${err.message}`);
+    throw err;
+  });
 }
+
+bootCore();
 
 function connectTransport() {
   if (socket && !socket.destroyed) return Promise.resolve(socket);
@@ -30,31 +72,16 @@ function connectTransport() {
     conn.setNoDelay(true);
     conn.on('data', (chunk) => {
       buffer += chunk.toString('utf8');
-      let index = buffer.indexOf('\n');
-      while (index >= 0) {
-        const line = buffer.slice(0, index);
-        buffer = buffer.slice(index + 1);
-        index = buffer.indexOf('\n');
-        if (!line) continue;
-
-        let payload;
-        try {
-          payload = JSON.parse(line);
-        } catch (err) {
-          console.log(`[spacedb] invalid tcp response: ${err.message}`);
-          continue;
+      const recvNs = Number(process.hrtime.bigint());
+      buffer = consumeFrames(buffer, (payload, line) => {
+        if (!payload) {
+          console.log(`[spacedb] invalid tcp response: ${line}`);
+          return;
         }
-
-        const request = pending.get(payload.id);
-        if (!request) continue;
-        pending.delete(payload.id);
-
-        if (payload.ok) {
-          request.resolve(payload.result);
-        } else {
-          request.reject(new Error(payload.error || 'spacedb transport error'));
-        }
-      }
+        // Stamp recv hrtime before complete so wantsMeta callers see it.
+        pending.markRecv(payload.id, recvNs);
+        pending.complete(payload.id, payload);
+      });
     });
 
     conn.on('error', (err) => {
@@ -66,17 +93,17 @@ function connectTransport() {
 
     conn.on('close', () => {
       if (socket === conn) socket = null;
-      for (const request of pending.values()) {
-        request.reject(new Error('spacedb transport closed'));
-      }
-      pending.clear();
+      pending.closeAll(new Error('spacedb transport closed'));
     });
   });
 
   return connecting;
 }
 
+// Dead code: kept for emergency HTTP fallback. All JS exports use transport() (TCP).
+// If this fires, hot path leaked to HTTP — investigate.
 function request(method, path, body) {
+  console.log(`[spacedb] WARN unexpected HTTP fallback method=${method} path=${path}`);
   return new Promise((resolve, reject) => {
     PerformHttpRequest(`${endpoint}${path}`, (status, response) => {
       let decoded = null;
@@ -106,17 +133,31 @@ function request(method, path, body) {
   });
 }
 
-async function transport(op, payload) {
+async function transport(op, payload, opts = {}) {
+  if (coreReady) await coreReady;
   const conn = await connectTransport();
   const id = `${Date.now()}_${++nextId}`;
-  const message = JSON.stringify({ ...payload, id, op });
+  const wire = { ...payload, id, op };
+  if (opts.profile) wire.profile = true;
+  const message = JSON.stringify(wire);
 
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    let sendAtNs = 0;
+    if (opts.profile) {
+      pending.add(id, (meta) => {
+        // meta = { result, profile, recvAtNs } from protocol.js wantsMeta path.
+        resolve({
+          result: meta.result,
+          profile: meta.profile,
+          bridgeNs: meta.recvAtNs > 0 && sendAtNs > 0 ? meta.recvAtNs - sendAtNs : 0,
+        });
+      }, reject, requestTimeoutMs, op, { wantsMeta: true });
+    } else {
+      pending.add(id, resolve, reject, requestTimeoutMs, op);
+    }
+    sendAtNs = Number(process.hrtime.bigint());
     conn.write(`${message}\n`, 'utf8', (err) => {
-      if (!err) return;
-      pending.delete(id);
-      reject(err);
+      if (err) pending.fail(id, err);
     });
   });
 }
@@ -131,6 +172,14 @@ function single(sqlOrName, params = []) {
 
 function execute(sqlOrName, params = []) {
   return transport('execute', { query: sqlOrName, params });
+}
+
+function executeProfiled(sqlOrName, params = []) {
+  return transport('execute', { query: sqlOrName, params }, { profile: true });
+}
+
+function queryProfiled(sqlOrName, params = []) {
+  return transport('query', { query: sqlOrName, params }, { profile: true });
 }
 
 function executeMany(sqlOrName, rows = []) {
@@ -186,6 +235,8 @@ exports('subscribe', subscribe);
 exports('unsubscribe', unsubscribe);
 exports('health', health);
 exports('stats', stats);
+exports('executeProfiled', executeProfiled);
+exports('queryProfiled', queryProfiled);
 
 on('onResourceStop', (stopped) => {
   if (stopped !== GetCurrentResourceName()) return;

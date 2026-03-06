@@ -11,3 +11,8 @@ tmp-*
 data/
 .DS_Store
 Thumbs.db
+node_modules/
+yarn.lock
+.yarn.installed
+CLAUDE.md
+PLAN.md
