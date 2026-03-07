@@ -47,22 +47,30 @@ type subRequest struct {
 }
 
 type transportRequest struct {
-	ID     string          `json:"id"`
-	Op     string          `json:"op"`
-	SubID  string          `json:"subId"`
-	Query  string          `json:"query"`
-	Params []interface{}   `json:"params"`
-	Rows   [][]interface{} `json:"rows"`
-	Name   string          `json:"name"`
-	SQL    string          `json:"sql"`
-	Steps  []db.Step       `json:"steps"`
+	ID      string          `json:"id"`
+	Op      string          `json:"op"`
+	SubID   string          `json:"subId"`
+	Query   string          `json:"query"`
+	Params  []interface{}   `json:"params"`
+	Rows    [][]interface{} `json:"rows"`
+	Name    string          `json:"name"`
+	SQL     string          `json:"sql"`
+	Steps   []db.Step       `json:"steps"`
+	Profile bool            `json:"profile,omitempty"`
+}
+
+type transportProfile struct {
+	ServerTotalNs int64 `json:"serverTotalNs"`
+	DispatchNs    int64 `json:"dispatchNs"`
+	DbDurNs       int64 `json:"dbDurNs"`
 }
 
 type transportResponse struct {
-	ID     string      `json:"id"`
-	OK     bool        `json:"ok"`
-	Result interface{} `json:"result,omitempty"`
-	Error  string      `json:"error,omitempty"`
+	ID      string            `json:"id"`
+	OK      bool              `json:"ok"`
+	Result  interface{}       `json:"result,omitempty"`
+	Error   string            `json:"error,omitempty"`
+	Profile *transportProfile `json:"profile,omitempty"`
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -167,15 +175,28 @@ func (s *Server) handleTransportConn(conn net.Conn) {
 }
 
 func (s *Server) handleTransportRequest(req transportRequest) transportResponse {
+	tRecv := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.QueryTimeout())
 	defer cancel()
 
+	tDispatch := time.Now()
 	result, dur, err := s.dispatchTransport(ctx, req)
+	tDone := time.Now()
 	s.logQuery(req.Op, req.Query, dur, err)
-	if err != nil {
-		return transportResponse{ID: req.ID, OK: false, Error: err.Error()}
+
+	var profile *transportProfile
+	if req.Profile {
+		profile = &transportProfile{
+			ServerTotalNs: tDone.Sub(tRecv).Nanoseconds(),
+			DispatchNs:    tDone.Sub(tDispatch).Nanoseconds(),
+			DbDurNs:       dur.Nanoseconds(),
+		}
 	}
-	return transportResponse{ID: req.ID, OK: true, Result: result}
+
+	if err != nil {
+		return transportResponse{ID: req.ID, OK: false, Error: err.Error(), Profile: profile}
+	}
+	return transportResponse{ID: req.ID, OK: true, Result: result, Profile: profile}
 }
 
 func (s *Server) dispatchTransport(ctx context.Context, req transportRequest) (interface{}, time.Duration, error) {
