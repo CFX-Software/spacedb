@@ -75,6 +75,37 @@ local tx = exports.spacedb:transaction({
 })
 ```
 
+## Convars
+
+| Convar | Default | Purpose |
+|---|---|---|
+| `spacedb_endpoint` | `http://127.0.0.1:37120` | HTTP base for `/health` and legacy probes |
+| `spacedb_transport` | `127.0.0.1:37121` | TCP transport for query/execute/transaction |
+| `spacedb_manage_core` | `true` | When true, the JS bridge spawns and supervises `spacedb-core.exe`. Set to `false` if you run the core as a system service or external process |
+| `spacedb_core_path` | `<resource>/bin/spacedb-core.exe` | Override binary path |
+| `spacedb_core_platform` | `windows` | Set to `linux` on Linux servers |
+| `spacedb_core_mode` | `restart` | `restart` kills any process owning the transport port and starts fresh on every resource boot. `reuse` keeps an existing running core if one already responds on `/health` |
+| `spacedb_request_timeout_ms` | `30000` | Per-request TCP timeout. Pending promises reject with `spacedb timeout after Nms` if the core never replies |
+
+## Profile exports
+
+Two extra exports surface end-to-end timing per call:
+
+```lua
+local meta = exports.spacedb:executeProfiled('INSERT INTO t (a, b) VALUES (?, ?)', { 1, 2 })
+-- meta.result   = whatever execute would return
+-- meta.bridgeNs = JS hrtime delta between socket write and response receive
+-- meta.profile  = {
+--   serverTotalNs = Go handler entry → return
+--   dispatchNs    = pre-dispatch → post-dispatch
+--   dbDurNs       = driver Exec duration
+-- }
+
+local meta = exports.spacedb:queryProfiled('SELECT * FROM t', {})
+```
+
+Use these to confirm where time is going on your own workload before reaching for batching or `executeMany`.
+
 ## Notes
 
 `config.json` and `bin` are ignored on purpose. Local database passwords, generated binaries, logs, and machine setup should not be committed.
