@@ -98,6 +98,41 @@ ensure spacedb-oxmysql
 
 The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, and `transaction`.
 
+## Performance
+
+Bench harness in `examples/spacedb-bench` against the real `oxmysql` resource, MariaDB on localhost, 1000 iterations per phase. Negative delta means OxMySQL won that phase.
+
+| Phase | spacedb qps | oxmysql qps | delta |
+|---|---|---|---|
+| query sequential | 710 | 509 | spacedb +28% |
+| query concurrent (50 workers) | 3134 | 1956 | spacedb +37% |
+| insert sequential | 219 | 199 | spacedb +9% |
+| insert concurrent (50 workers) | 1618 | 1239 | spacedb +23% |
+| insert bulk multi-row (1000 rows in one statement) | 30303 | 33333 | within noise |
+
+### Where the time goes — single sequential insert
+
+Profile path: every request carries `profile: true`, the Go core stamps `ServerTotalNs` / `DispatchNs` / `DbDurNs`, the JS bridge stamps hrtime around the socket write+receive, and the Lua bench harness times the export call. Run `spacedb_bench_iterations 500` and watch the `spacedb insert sequential profile` phase.
+
+```
+per-call avg over 500 inserts (ms):
+
+lua-total      4.40    end-to-end Lua wall clock
+bridge-rtt     4.10    JS write → JS recv
+server-total   3.79    Go handler entry → return
+db-exec        3.79    driver Exec()
+
+derived:
+  Lua → JS bridge       0.33    (7.5%)  — FiveM scheduler + interop
+  JS bridge → Go core   0.31    (7.0%)  — TCP + JSON
+  Go core non-DB        ~0      (0.1%)  — handler overhead
+  MySQL driver round trip 3.79  (86%)   — the floor
+```
+
+86% of single-insert latency is the MySQL driver itself: network round trip, server-side statement prep, disk fsync. That number is set by the database, not by spacedb. spacedb adds ~0.6 ms of bridge overhead per call — Lua interop and TCP/JSON each cost roughly the same.
+
+For workloads that need more than 220 sequential single-insert qps, use `executeMany` (22k–30k qps in the bench) or `transaction`. Single sequential inserts are an artificial worst case and the bench includes them only to keep OxMySQL parity honest.
+
 ## Tests
 
 `examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
