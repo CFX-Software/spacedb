@@ -4,6 +4,6 @@
   "private": true,
   "description": "High-performance database bridge for FiveM",
   "scripts": {
-    "test": "node --test server/js/protocol.test.js"
+    "test": "node --test server/js/protocol.test.js server/js/lifecycle.test.js"
   }
 }
