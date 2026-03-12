@@ -16,11 +16,42 @@ let nextId = 0;
 let socket = null;
 let buffer = '';
 let connecting = null;
-let coreReady = null;
+let supervisedChild = null;
+let shuttingDown = false;
+let respawnAttempt = 0;
+
+// Deferred so callers can `await coreReady()` and get blocked until the
+// CURRENT bootCore() resolves — even across respawns. On crash we install a
+// fresh deferred before the boot retry so transport() does not race a stale
+// resolved promise into a dead socket.
+function makeDeferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+let coreDeferred = makeDeferred();
+function coreReady() { return coreDeferred.promise; }
+
+function watchChild(child) {
+  if (!child) return;
+  supervisedChild = child;
+  child.once('exit', (code, signal) => {
+    if (shuttingDown) return;
+    console.log(`[spacedb] WARN core exited unexpectedly code=${code} signal=${signal}; respawning`);
+    pending.closeAll(new Error('spacedb core crashed; respawning'));
+    if (socket && !socket.destroyed) socket.destroy();
+    socket = null;
+    // Block new callers until the respawn finishes.
+    coreDeferred = makeDeferred();
+    const delay = Math.min(5000, 200 * 2 ** respawnAttempt);
+    respawnAttempt += 1;
+    setTimeout(bootCore, delay);
+  });
+}
 
 function bootCore() {
   if (!manageCore) {
-    coreReady = Promise.resolve({ skipped: true });
+    coreDeferred.resolve({ skipped: true });
     return;
   }
   const isWindows = process.platform === 'win32';
@@ -32,7 +63,7 @@ function bootCore() {
   const logPath = path.join(resourceRoot, 'spacedb-core.log');
   const transportAddr = parseAddress(transportEndpoint);
 
-  coreReady = ensureCore({
+  ensureCore({
     endpoint,
     transportPort: String(transportAddr.port),
     binary,
@@ -47,10 +78,19 @@ function bootCore() {
     } else {
       console.log(`[spacedb] core ready driver=${result.driver} pid=${result.pid} endpoint=${endpoint}`);
     }
-    return result;
+    if (result.child) watchChild(result.child);
+    respawnAttempt = 0;
+    coreDeferred.resolve(result);
   }).catch((err) => {
-    console.log(`[spacedb] FATAL core failed to start: ${err.message}`);
-    throw err;
+    console.log(`[spacedb] core boot failed: ${err.message}`);
+    if (shuttingDown) {
+      coreDeferred.reject(err);
+      return;
+    }
+    const delay = Math.min(5000, 200 * 2 ** respawnAttempt);
+    respawnAttempt += 1;
+    console.log(`[spacedb] retrying core boot in ${delay}ms (attempt ${respawnAttempt})`);
+    setTimeout(bootCore, delay);
   });
 }
 
@@ -134,7 +174,7 @@ function request(method, path, body) {
 }
 
 async function transport(op, payload, opts = {}) {
-  if (coreReady) await coreReady;
+  await coreReady();
   const conn = await connectTransport();
   const id = `${Date.now()}_${++nextId}`;
   const wire = { ...payload, id, op };
@@ -240,8 +280,12 @@ exports('queryProfiled', queryProfiled);
 
 on('onResourceStop', (stopped) => {
   if (stopped !== GetCurrentResourceName()) return;
+  shuttingDown = true;
   for (const id of subscriptions) {
     transport('unsubscribe', { subId: id }).catch(() => {});
   }
   if (socket && !socket.destroyed) socket.destroy();
+  // Leave supervisedChild alone — it's detached and may be reused by a
+  // later resource boot in 'reuse' mode. 'restart' mode will kill it on the
+  // next boot's killByPort sweep.
 });
