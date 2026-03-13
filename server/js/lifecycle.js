@@ -145,7 +145,7 @@ async function ensureCore({ endpoint, transportPort, binary, config, logPath, mo
 
   const child = spawnCore({ binary, config, logPath });
   const health = await waitForReady(endpoint, 30000);
-  return { reused: false, pid: child.pid, driver: health.driver };
+  return { reused: false, pid: child.pid, driver: health.driver, child };
 }
 
 module.exports = { ensureCore, probeHealth, killByPort, spawnCore };
