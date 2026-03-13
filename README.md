@@ -8,7 +8,29 @@ The runtime path uses a persistent local TCP transport for query calls. HTTP sta
 
 The first target is a clean native API. Compatibility layers for older resources such as OxMySQL and mysql async belong in the next pass once the core behavior is stable.
 
-## Local setup
+## Install (prebuilt)
+
+1. Grab the binary for your platform from [Releases](https://github.com/VexoaXYZ/SPACEDB/releases) and drop it into `bin/`:
+
+| Platform | File |
+|---|---|
+| Windows x64 | `spacedb-core-windows-amd64.exe` → `bin/spacedb-core.exe` |
+| Linux x64 | `spacedb-core-linux-amd64` → `bin/spacedb-core` |
+| Linux arm64 | `spacedb-core-linux-arm64` → `bin/spacedb-core` |
+
+Each artifact ships with a `.sha256` next to it.
+
+2. Copy `config.example.json` to `config.json`, set your database DSN.
+
+3. Add the resource to `server.cfg`:
+
+```cfg
+ensure spacedb
+```
+
+The JS bridge spawns the core automatically on resource start. Linux users set `setr spacedb_core_platform linux` in `server.cfg`.
+
+## Build from source
 
 1. Start the dev databases.
 
@@ -23,17 +45,13 @@ cd core
 go build -o ../bin/spacedb-core.exe ./cmd/spacedb-core
 ```
 
-3. Make sure the config is valid.
+3. Validate the config.
 
 ```powershell
 bin\spacedb-core.exe -config config.json -check-config
 ```
 
-4. Add the resource to `server.cfg`.
-
-```cfg
-ensure spacedb
-```
+4. `ensure spacedb` in `server.cfg`.
 
 ## Databases
 
