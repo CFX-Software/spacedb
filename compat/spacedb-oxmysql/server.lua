@@ -102,6 +102,22 @@ local function transaction(queries, paramsOrCb, maybeCb)
     return callbackOrReturn(ok, cb)
 end
 
+local function rawExecute(sql, rows, cb)
+    -- OxMySQL rawExecute: one SQL, many param sets, batched. On SELECT it
+    -- returns rows like query. Map writes to executeMany; map SELECT to a
+    -- single query against the first param set (rare path — most callers
+    -- use rawExecute for INSERT/UPDATE only).
+    rows, cb = normalizeParams(rows, cb)
+    local upper = sql:gsub('^%s+', ''):sub(1, 6):upper()
+    if upper == 'SELECT' then
+        local first = rows[1] or {}
+        local result = exports.spacedb:query(sql, first)
+        return callbackOrReturn(result, cb)
+    end
+    local result = exports.spacedb:executeMany(sql, rows)
+    return callbackOrReturn(result, cb)
+end
+
 exports('query', query)
 exports('single', single)
 exports('scalar', scalar)
@@ -110,3 +126,18 @@ exports('insert', insert)
 exports('update', update)
 exports('prepare', prepare)
 exports('transaction', transaction)
+exports('rawExecute', rawExecute)
+
+-- _async aliases: OxMySQL exposes promise variants under <fn>_async.
+-- spacedb exports already return synchronously (the JS bridge yields the
+-- caller via FiveM scheduler), so callers awaiting the promise on the JS
+-- side get the same value. Lua callers receive the value directly.
+exports('query_async', query)
+exports('single_async', single)
+exports('scalar_async', scalar)
+exports('execute_async', execute)
+exports('insert_async', insert)
+exports('update_async', update)
+exports('prepare_async', prepare)
+exports('transaction_async', transaction)
+exports('rawExecute_async', rawExecute)
