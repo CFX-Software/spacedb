@@ -370,6 +370,69 @@ local function run()
         exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'native-concurrent', 1 })
     end)
 
+    -- Concurrent profile: same workload, profile flag on. Reveals whether
+    -- the p99 tail is DB-bound (driver contention) or server-side queueing.
+    do
+        collectgarbage('collect')
+        local name = 'spacedb insert concurrent profile'
+        log(('phase started %s'):format(name))
+        local profIters = math.min(iterations, 500)
+        local profWorkers = math.min(concurrency, 25)
+        local perWorker = math.floor(profIters / profWorkers)
+        local luaTotal = {}
+        local bridge = {}
+        local serverTotal = {}
+        local serverDispatch = {}
+        local dbExec = {}
+        local completed = 0
+        local start = now()
+        for _ = 1, profWorkers do
+            CreateThread(function()
+                for i = 1, perWorker do
+                    local t0 = sampleNow()
+                    local meta = exports.spacedb:executeProfiled(
+                        'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)',
+                        { 'native-concurrent-profile', 1 }
+                    )
+                    local t1 = sampleNow()
+                    luaTotal[#luaTotal + 1] = t1 - t0
+                    if meta and meta.profile then
+                        bridge[#bridge + 1] = (meta.bridgeNs or 0) / 1e6
+                        serverTotal[#serverTotal + 1] = (meta.profile.serverTotalNs or 0) / 1e6
+                        serverDispatch[#serverDispatch + 1] = (meta.profile.dispatchNs or 0) / 1e6
+                        dbExec[#dbExec + 1] = (meta.profile.dbDurNs or 0) / 1e6
+                    end
+                    if i % 25 == 0 then Wait(0) end
+                end
+                completed = completed + 1
+            end)
+        end
+        local deadline = now() + 60000
+        while completed < profWorkers and now() < deadline do Wait(0) end
+        local totalMs = elapsed(start)
+        local count = perWorker * profWorkers
+
+        local function describe(label, samples)
+            if #samples == 0 then return end
+            table.sort(samples)
+            local sum = 0
+            for _, v in ipairs(samples) do sum = sum + v end
+            log(('  %-22s avg=%s p50=%s p95=%s p99=%s max=%s'):format(
+                label, round(sum / #samples),
+                round(percentile(samples, 0.50)),
+                round(percentile(samples, 0.95)),
+                round(percentile(samples, 0.99)),
+                round(samples[#samples])))
+        end
+
+        log(('%s count=%d totalMs=%d workers=%d (per-stage ms)'):format(name, count, totalMs, profWorkers))
+        describe('lua-total', luaTotal)
+        describe('bridge-rtt', bridge)
+        describe('server-total', serverTotal)
+        describe('server-dispatch', serverDispatch)
+        describe('db-exec', dbExec)
+    end
+
     runConcurrent('oxmysql real insert concurrent', function()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real-concurrent', 1 })
     end)
