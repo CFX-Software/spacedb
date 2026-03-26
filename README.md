@@ -147,7 +147,7 @@ ensure spacedb
 ensure spacedb-oxmysql
 ```
 
-The adapter currently covers `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, and `transaction`.
+The adapter covers every export documented at https://overextended.dev/oxmysql/: `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, `transaction`, `rawExecute`, plus their `_async` aliases. Drop-in for resources that import `oxmysql` exports — change the export resource name from `oxmysql` to `spacedb-oxmysql`.
 
 ## Performance
 

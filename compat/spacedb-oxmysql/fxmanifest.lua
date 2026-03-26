@@ -17,5 +17,15 @@ server_exports {
     'insert',
     'update',
     'prepare',
-    'transaction'
+    'transaction',
+    'rawExecute',
+    'query_async',
+    'single_async',
+    'scalar_async',
+    'execute_async',
+    'insert_async',
+    'update_async',
+    'prepare_async',
+    'transaction_async',
+    'rawExecute_async'
 }
