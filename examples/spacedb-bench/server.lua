@@ -235,6 +235,23 @@ local function waitForHealth(timeoutMs)
     return false
 end
 
+local function warmup()
+    -- Cold DB pages, unprepared statements, cold JIT in the JS bridge add 3x
+    -- variance to first-phase numbers. Run a small throwaway batch against
+    -- both spacedb and oxmysql so every measured phase starts hot.
+    log('phase started warmup (untimed)')
+    for _ = 1, 100 do
+        exports.spacedb:query('SELECT 1 AS ok', {})
+        exports.spacedb:execute('INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'warmup', 1 })
+    end
+    for _ = 1, 100 do
+        awaitOxmysql('query', 'SELECT 1 AS ok', {})
+        awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'warmup', 1 })
+    end
+    exports.spacedb:execute('DELETE FROM spacedb_bench_items WHERE name = ?', { 'warmup' })
+    log('warmup complete')
+end
+
 local function run()
     if not waitForHealth(30000) then
         log('FATAL core /health did not respond within 30s; aborting bench')
@@ -242,6 +259,7 @@ local function run()
     end
     log(('starting iterations=%d concurrency=%d'):format(iterations, concurrency))
     setup()
+    warmup()
 
     runSequential('spacedb query sequential', function()
         exports.spacedb:query('SELECT 1 AS ok', {})

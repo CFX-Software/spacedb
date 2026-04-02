@@ -184,6 +184,21 @@ derived:
 
 For workloads that need more than 220 sequential single-insert qps, use `executeMany` (22k–30k qps in the bench) or `transaction`. Single sequential inserts are an artificial worst case and the bench includes them only to keep OxMySQL parity honest.
 
+### Concurrent insert tail (p99)
+
+```
+25 workers x 20 inserts, per-stage p99 ms:
+
+lua-total      37
+bridge-rtt     35
+server-total   34.5   ← spacedb server time
+db-exec        34.5   ← driver Exec time
+
+OxMySQL concurrent insert p99: 82 ms
+```
+
+spacedb server-total tracks db-exec to within 0.5 ms at p99: there is no measurable queueing inside the Go core under 25-way concurrency. The 2.4× p99 win over OxMySQL is structural — single-socket id-multiplexed transport vs OxMySQL's per-call Node-side allocation.
+
 ## Tests
 
 `examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
