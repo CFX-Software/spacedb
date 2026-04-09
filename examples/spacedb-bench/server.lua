@@ -455,6 +455,23 @@ local function run()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real-concurrent', 1 })
     end)
 
+    -- Cache hit phase. Insert a row, prime the cache once, then loop N
+    -- reads against the cache. This is the headline 100x number — the
+    -- whole point of the in-process read cache.
+    exports.spacedb:execute('INSERT INTO spacedb_bench_items (id, name, score) VALUES (?, ?, ?)', { 999999, 'cache-target', 42 })
+    exports.spacedb:getById('spacedb_bench_items', 999999) -- prime
+    runSequential('spacedb getById cache hit', function()
+        exports.spacedb:getById('spacedb_bench_items', 999999)
+    end)
+    -- Baseline: same lookup over the normal single() path so the speedup
+    -- is visible side by side in the summary log.
+    runSequential('spacedb single by id (no cache)', function()
+        exports.spacedb:single('SELECT * FROM spacedb_bench_items WHERE id = ?', { 999999 })
+    end)
+    local cacheStats = exports.spacedb:cacheStats()
+    log(('cache stats hits=%d misses=%d entries=%d'):format(
+        cacheStats.hits or 0, cacheStats.misses or 0, cacheStats.entries or 0))
+
     printSummary()
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})
     log('finished')

@@ -222,6 +222,30 @@ function queryProfiled(sqlOrName, params = []) {
   return transport('query', { query: sqlOrName, params }, { profile: true });
 }
 
+// In-process read cache. PK column defaults to "id".
+async function getById(table, key, pkColumn = 'id') {
+  const result = await transport('cacheGet', { table, key: String(key), pkColumn });
+  return result && result.row != null ? result.row : null;
+}
+
+// Pure cache update — caller is responsible for persisting the row via
+// execute/insert/update first. Phase 3 will auto-invalidate on writes.
+function setById(table, key, row) {
+  return transport('cacheSet', { table, key: String(key), row });
+}
+
+function invalidate(table, key) {
+  return transport('cacheInvalidate', { table, key: String(key) });
+}
+
+function invalidateTable(table) {
+  return transport('cacheInvalidate', { table });
+}
+
+function cacheStats() {
+  return transport('cacheStats', {});
+}
+
 function executeMany(sqlOrName, rows = []) {
   return transport('executeMany', { query: sqlOrName, rows });
 }
@@ -277,6 +301,11 @@ exports('health', health);
 exports('stats', stats);
 exports('executeProfiled', executeProfiled);
 exports('queryProfiled', queryProfiled);
+exports('getById', getById);
+exports('setById', setById);
+exports('invalidate', invalidate);
+exports('invalidateTable', invalidateTable);
+exports('cacheStats', cacheStats);
 
 on('onResourceStop', (stopped) => {
   if (stopped !== GetCurrentResourceName()) return;
