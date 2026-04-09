@@ -92,7 +92,8 @@ local function printSummary()
         compare('query concurrent', 'spacedb query concurrent', 'oxmysql real query concurrent'),
         compare('insert sequential', 'spacedb insert sequential', 'oxmysql real insert sequential'),
         compare('insert bulk multi-row', 'spacedb insert bulk multi-row', 'oxmysql real insert bulk multi-row'),
-        compare('insert concurrent', 'spacedb insert concurrent', 'oxmysql real insert concurrent')
+        compare('insert concurrent', 'spacedb insert concurrent', 'oxmysql real insert concurrent'),
+        compare('get-by-id (cache vs ox)', 'spacedb getById cache hit', 'oxmysql real single by id (no cache)')
     }
 
     log('summary')
@@ -455,18 +456,21 @@ local function run()
         awaitOxmysql('execute', 'INSERT INTO spacedb_bench_items (name, score) VALUES (?, ?)', { 'real-concurrent', 1 })
     end)
 
-    -- Cache hit phase. Insert a row, prime the cache once, then loop N
-    -- reads against the cache. This is the headline 100x number — the
-    -- whole point of the in-process read cache.
+    -- Get-by-id workload. Three runners do the SAME logical operation
+    -- (look up one row by primary key) — spacedb with its in-process
+    -- cache, spacedb without (single() path), and OxMySQL which has no
+    -- in-process cache at all and pays the full MySQL RTT each call.
+    -- The cache vs OxMySQL number is the headline competitive win.
     exports.spacedb:execute('INSERT INTO spacedb_bench_items (id, name, score) VALUES (?, ?, ?)', { 999999, 'cache-target', 42 })
     exports.spacedb:getById('spacedb_bench_items', 999999) -- prime
     runSequential('spacedb getById cache hit', function()
         exports.spacedb:getById('spacedb_bench_items', 999999)
     end)
-    -- Baseline: same lookup over the normal single() path so the speedup
-    -- is visible side by side in the summary log.
     runSequential('spacedb single by id (no cache)', function()
         exports.spacedb:single('SELECT * FROM spacedb_bench_items WHERE id = ?', { 999999 })
+    end)
+    runSequential('oxmysql real single by id (no cache)', function()
+        awaitOxmysql('single', 'SELECT * FROM spacedb_bench_items WHERE id = ?', { 999999 })
     end)
     local cacheStats = exports.spacedb:cacheStats()
     log(('cache stats hits=%d misses=%d entries=%d'):format(
