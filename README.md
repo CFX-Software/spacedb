@@ -137,7 +137,13 @@ Identifier validation: `table` and `pkColumn` must match `^[A-Za-z_][A-Za-z0-9_]
 
 Default capacity: 100 000 entries. Eviction is LRU. No TTL by default — entries live until invalidated or evicted.
 
-Not yet shipped (Phase 3): automatic invalidation when an `execute('UPDATE users SET ... WHERE id = ?', ...)` matches a cached row. Today that requires the explicit `setById` or `invalidate` call shown above.
+**Auto-invalidation**: every `execute`, `executeMany`, and `transaction` is parsed for the affected `(table, key)` pair. When the SQL matches a safe subset (e.g. `UPDATE users SET ... WHERE id = ?`, `DELETE FROM users WHERE id = ?`) the matching cache entry is dropped. SQL that doesn't match the safe subset (joins, multi-row WHERE, upserts) drops the entire table from the cache — correctness over efficiency. Plain `INSERT` is a no-op (a brand-new row can't be in the cache yet). So the typical pattern works without manual `invalidate` calls:
+
+```lua
+local user = exports.spacedb:getById('users', 5)         -- caches the row
+exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })
+local fresh = exports.spacedb:getById('users', 5)        -- cache miss → fresh fetch
+```
 
 ## Profile exports
 
