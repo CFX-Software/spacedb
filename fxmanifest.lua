@@ -26,5 +26,10 @@ server_exports {
     'health',
     'stats',
     'executeProfiled',
-    'queryProfiled'
+    'queryProfiled',
+    'getById',
+    'setById',
+    'invalidate',
+    'invalidateTable',
+    'cacheStats'
 }

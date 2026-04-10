@@ -9,18 +9,26 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
+	"github.com/inkwell/spacedb/core/internal/cache"
 	"github.com/inkwell/spacedb/core/internal/config"
 	"github.com/inkwell/spacedb/core/internal/db"
 	"github.com/inkwell/spacedb/core/internal/realtime"
 )
 
+// validIdent guards SQL identifiers we splice into queries (table and PK
+// column names from the cacheGet/cacheSet payload). Anything that does
+// not match is rejected before reaching the database driver.
+var validIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 type Server struct {
 	cfg   config.Config
 	store *db.Store
 	hub   *realtime.Hub
+	cache *cache.Cache
 	http  *http.Server
 	tcp   net.Listener
 }
@@ -47,16 +55,20 @@ type subRequest struct {
 }
 
 type transportRequest struct {
-	ID      string          `json:"id"`
-	Op      string          `json:"op"`
-	SubID   string          `json:"subId"`
-	Query   string          `json:"query"`
-	Params  []interface{}   `json:"params"`
-	Rows    [][]interface{} `json:"rows"`
-	Name    string          `json:"name"`
-	SQL     string          `json:"sql"`
-	Steps   []db.Step       `json:"steps"`
-	Profile bool            `json:"profile,omitempty"`
+	ID       string                 `json:"id"`
+	Op       string                 `json:"op"`
+	SubID    string                 `json:"subId"`
+	Query    string                 `json:"query"`
+	Params   []interface{}          `json:"params"`
+	Rows     [][]interface{}        `json:"rows"`
+	Name     string                 `json:"name"`
+	SQL      string                 `json:"sql"`
+	Steps    []db.Step              `json:"steps"`
+	Profile  bool                   `json:"profile,omitempty"`
+	Table    string                 `json:"table,omitempty"`
+	Key      string                 `json:"key,omitempty"`
+	PKColumn string                 `json:"pkColumn,omitempty"`
+	Row      map[string]interface{} `json:"row,omitempty"`
 }
 
 type transportProfile struct {
@@ -84,6 +96,7 @@ func New(cfg config.Config) (*Server, error) {
 
 	s := &Server{cfg: cfg, store: store}
 	s.hub = realtime.New(store, cfg.PollInterval(), cfg.QueryTimeout())
+	s.cache = cache.New(cache.Options{MaxEntries: 100_000})
 	mux := http.NewServeMux()
 	s.routes(mux)
 	s.http = &http.Server{
@@ -183,6 +196,9 @@ func (s *Server) handleTransportRequest(req transportRequest) transportResponse 
 	result, dur, err := s.dispatchTransport(ctx, req)
 	tDone := time.Now()
 	s.logQuery(req.Op, req.Query, dur, err)
+	if err == nil {
+		s.maybeInvalidateCache(req)
+	}
 
 	var profile *transportProfile
 	if req.Profile {
@@ -230,9 +246,128 @@ func (s *Server) dispatchTransport(ctx context.Context, req transportRequest) (i
 		return map[string]interface{}{"ok": true, "name": req.Name}, time.Since(start), s.store.Prepare(req.Name, req.SQL)
 	case "transaction":
 		return s.store.Transaction(ctx, req.Steps)
+	case "cacheGet":
+		return s.cacheGet(ctx, req)
+	case "cacheSet":
+		return s.cacheSet(req)
+	case "cacheInvalidate":
+		return s.cacheInvalidate(req)
+	case "cacheStats":
+		return s.cache.Stats(), 0, nil
 	default:
 		return nil, 0, fmt.Errorf("unsupported transport op %q", req.Op)
 	}
+}
+
+// cacheGet returns a cached row when present, otherwise fetches it from the
+// database via `SELECT * FROM <table> WHERE <pk_column> = ?` and caches the
+// result. Validates table/pkColumn against an identifier regex to keep this
+// from being a SQL injection sink.
+func (s *Server) cacheGet(ctx context.Context, req transportRequest) (interface{}, time.Duration, error) {
+	if req.Table == "" || req.Key == "" {
+		return nil, 0, errors.New("cacheGet requires table and key")
+	}
+	pkColumn := req.PKColumn
+	if pkColumn == "" {
+		pkColumn = "id"
+	}
+	if !validIdent.MatchString(req.Table) || !validIdent.MatchString(pkColumn) {
+		return nil, 0, fmt.Errorf("invalid identifier table=%q pkColumn=%q", req.Table, pkColumn)
+	}
+
+	if row, ok := s.cache.Get(req.Table, req.Key); ok {
+		return map[string]interface{}{"row": row, "cached": true}, 0, nil
+	}
+
+	sql := fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", req.Table, pkColumn)
+	row, dur, err := s.store.Single(ctx, sql, []interface{}{req.Key})
+	if err != nil {
+		return nil, dur, err
+	}
+	if row != nil {
+		s.cache.Set(req.Table, req.Key, row)
+	}
+	return map[string]interface{}{"row": row, "cached": false}, dur, nil
+}
+
+// cacheSet updates the cache entry. Callers are responsible for persisting
+// the row via execute/insert/update; Phase 3 will auto-invalidate on those
+// paths. For now we keep the cache layer SQL-free.
+func (s *Server) cacheSet(req transportRequest) (interface{}, time.Duration, error) {
+	if req.Table == "" || req.Key == "" {
+		return nil, 0, errors.New("cacheSet requires table and key")
+	}
+	if req.Row == nil {
+		return nil, 0, errors.New("cacheSet requires row")
+	}
+	if !validIdent.MatchString(req.Table) {
+		return nil, 0, fmt.Errorf("invalid table=%q", req.Table)
+	}
+	s.cache.Set(req.Table, req.Key, req.Row)
+	return map[string]interface{}{"ok": true}, 0, nil
+}
+
+// maybeInvalidateCache is called after every successful transport request.
+// For write ops (execute / executeMany / transaction) it parses the SQL and
+// drops cached rows that the write may have made stale. The parser is
+// conservative: unfamiliar shapes drop the entire table.
+func (s *Server) maybeInvalidateCache(req transportRequest) {
+	switch req.Op {
+	case "execute":
+		s.applyParse(cache.Parse(req.Query, req.Params))
+	case "executeMany":
+		// Same SQL across many param sets. If the parser pins individual
+		// rows, evict each; if it falls back to FullTable, one call suffices.
+		if len(req.Rows) == 0 {
+			s.applyParse(cache.Parse(req.Query, nil))
+			return
+		}
+		first := cache.Parse(req.Query, asInterfaceSlice(req.Rows[0]))
+		if first.FullTable != "" || first.NoOp {
+			s.applyParse(first)
+			return
+		}
+		for _, row := range req.Rows {
+			s.applyParse(cache.Parse(req.Query, asInterfaceSlice(row)))
+		}
+	case "transaction":
+		for _, step := range req.Steps {
+			s.applyParse(cache.Parse(step.Query, step.Params))
+		}
+	}
+}
+
+func (s *Server) applyParse(r cache.ParseResult) {
+	if r.NoOp {
+		return
+	}
+	if r.FullTable != "" {
+		s.cache.InvalidateTable(r.FullTable)
+		return
+	}
+	for _, e := range r.Entries {
+		s.cache.Invalidate(e.Table, e.Key)
+	}
+}
+
+func asInterfaceSlice(row []interface{}) []interface{} {
+	return row
+}
+
+// cacheInvalidate drops a single entry, or the whole table when key is empty.
+func (s *Server) cacheInvalidate(req transportRequest) (interface{}, time.Duration, error) {
+	if req.Table == "" {
+		return nil, 0, errors.New("cacheInvalidate requires table")
+	}
+	if !validIdent.MatchString(req.Table) {
+		return nil, 0, fmt.Errorf("invalid table=%q", req.Table)
+	}
+	if req.Key == "" {
+		s.cache.InvalidateTable(req.Table)
+	} else {
+		s.cache.Invalidate(req.Table, req.Key)
+	}
+	return map[string]interface{}{"ok": true}, 0, nil
 }
 
 func (s *Server) routes(mux *http.ServeMux) {

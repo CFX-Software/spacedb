@@ -107,6 +107,44 @@ local tx = exports.spacedb:transaction({
 
 The bridge supervises the spawned core. On unexpected exit it rejects in-flight requests, holds new ones until respawn finishes, and retries with backoff (200 ms → 400 → 800 → ... capped at 5 s). Crashes during heavy load surface as a single batch of rejected promises plus a `core exited unexpectedly` log line rather than silent timeouts.
 
+## In-process read cache
+
+For hot key lookups, spacedb has a Go-side row cache keyed by `(table, primary_key)`. Read-through on miss, manual write-through. Single-process, sharded, LRU-evicted, optional TTL.
+
+```lua
+-- Get-by-id with read-through. Cache miss does SELECT * FROM users WHERE id = ?
+-- and stores the row; subsequent calls return from Go memory (~15-50 µs).
+local user = exports.spacedb:getById('users', 5)
+
+-- Non-standard PK column? Pass it as the third arg.
+local row = exports.spacedb:getById('player_inventory', 'abc-license', 'license')
+
+-- After an update, push the new row back into the cache. Until Phase 3 ships,
+-- callers are responsible for cache freshness on writes.
+exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })
+exports.spacedb:setById('users', 5, { id = 5, name = 'Jane', score = 200 })
+
+-- Drop one entry or a whole table.
+exports.spacedb:invalidate('users', 5)
+exports.spacedb:invalidateTable('users')
+
+-- Counters
+local s = exports.spacedb:cacheStats()
+-- s.hits, s.misses, s.entries, s.evictions
+```
+
+Identifier validation: `table` and `pkColumn` must match `^[A-Za-z_][A-Za-z0-9_]*$`. Anything else (spaces, semicolons, backticks) is rejected before reaching the SQL driver.
+
+Default capacity: 100 000 entries. Eviction is LRU. No TTL by default — entries live until invalidated or evicted.
+
+**Auto-invalidation**: every `execute`, `executeMany`, and `transaction` is parsed for the affected `(table, key)` pair. When the SQL matches a safe subset (e.g. `UPDATE users SET ... WHERE id = ?`, `DELETE FROM users WHERE id = ?`) the matching cache entry is dropped. SQL that doesn't match the safe subset (joins, multi-row WHERE, upserts) drops the entire table from the cache — correctness over efficiency. Plain `INSERT` is a no-op (a brand-new row can't be in the cache yet). So the typical pattern works without manual `invalidate` calls:
+
+```lua
+local user = exports.spacedb:getById('users', 5)         -- caches the row
+exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })
+local fresh = exports.spacedb:getById('users', 5)        -- cache miss → fresh fetch
+```
+
 ## Profile exports
 
 Two extra exports surface end-to-end timing per call:
