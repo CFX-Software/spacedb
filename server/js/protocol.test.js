@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseAddress, consumeFrames, createPendingMap } = require('./protocol');
+const { parseAddress, consumeFrames, createPendingMap, createMirror } = require('./protocol');
 
 test('parseAddress splits host:port', () => {
   assert.deepEqual(parseAddress('10.0.0.1:5555'), { host: '10.0.0.1', port: 5555 });
@@ -125,6 +125,66 @@ test('pending wantsMeta omitted gives raw result (back-compat)', async () => {
 test('markRecv on unknown id is a no-op', () => {
   const map = createPendingMap();
   assert.doesNotThrow(() => map.markRecv('missing', 1));
+});
+
+test('mirror get/set round-trip', () => {
+  const m = createMirror({ maxEntries: 100 });
+  m.set('users', '1', { id: 1, name: 'Jane' });
+  assert.deepEqual(m.get('users', '1'), { id: 1, name: 'Jane' });
+});
+
+test('mirror get miss returns undefined', () => {
+  const m = createMirror();
+  assert.equal(m.get('users', 'missing'), undefined);
+});
+
+test('mirror invalidate drops one entry', () => {
+  const m = createMirror();
+  m.set('users', '1', { id: 1 });
+  m.invalidate('users', '1');
+  assert.equal(m.get('users', '1'), undefined);
+});
+
+test('mirror invalidateTable drops all rows of that table', () => {
+  const m = createMirror();
+  for (let i = 0; i < 5; i += 1) {
+    m.set('users', String(i), { id: i });
+    m.set('posts', String(i), { id: i });
+  }
+  m.invalidateTable('users');
+  assert.equal(m.get('users', '3'), undefined);
+  assert.deepEqual(m.get('posts', '3'), { id: 3 });
+  assert.equal(m.size(), 5);
+});
+
+test('mirror evicts oldest when over cap', () => {
+  const m = createMirror({ maxEntries: 3 });
+  m.set('t', 'a', { v: 1 });
+  m.set('t', 'b', { v: 2 });
+  m.set('t', 'c', { v: 3 });
+  m.set('t', 'd', { v: 4 }); // should evict 'a'
+  assert.equal(m.get('t', 'a'), undefined);
+  assert.deepEqual(m.get('t', 'd'), { v: 4 });
+  assert.equal(m.size(), 3);
+});
+
+test('mirror get touches entry (LRU)', () => {
+  const m = createMirror({ maxEntries: 3 });
+  m.set('t', 'a', { v: 1 });
+  m.set('t', 'b', { v: 2 });
+  m.set('t', 'c', { v: 3 });
+  // Touch 'a' so 'b' becomes the LRU victim.
+  m.get('t', 'a');
+  m.set('t', 'd', { v: 4 });
+  assert.deepEqual(m.get('t', 'a'), { v: 1 });
+  assert.equal(m.get('t', 'b'), undefined);
+});
+
+test('mirror clear empties the map', () => {
+  const m = createMirror();
+  m.set('t', '1', { v: 1 });
+  m.clear();
+  assert.equal(m.size(), 0);
 });
 
 test('pending fail rejects single entry and clears timer', async () => {

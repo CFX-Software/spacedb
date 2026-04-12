@@ -31,6 +31,17 @@ type Server struct {
 	cache *cache.Cache
 	http  *http.Server
 	tcp   net.Listener
+
+	subsMu sync.RWMutex
+	subs   map[*transportSub]struct{}
+}
+
+// transportSub wraps a single TCP transport connection so the server can
+// fan out unsolicited events (cache invalidations) without racing the
+// per-conn response writer.
+type transportSub struct {
+	encoder *json.Encoder
+	writeMu *sync.Mutex
 }
 
 type queryRequest struct {
@@ -94,7 +105,11 @@ func New(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{cfg: cfg, store: store}
+	s := &Server{
+		cfg:   cfg,
+		store: store,
+		subs:  make(map[*transportSub]struct{}),
+	}
 	s.hub = realtime.New(store, cfg.PollInterval(), cfg.QueryTimeout())
 	s.cache = cache.New(cache.Options{MaxEntries: 100_000})
 	mux := http.NewServeMux()
@@ -164,6 +179,15 @@ func (s *Server) handleTransportConn(conn net.Conn) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	encoder := json.NewEncoder(conn)
 	var writeMu sync.Mutex
+	sub := &transportSub{encoder: encoder, writeMu: &writeMu}
+	s.subsMu.Lock()
+	s.subs[sub] = struct{}{}
+	s.subsMu.Unlock()
+	defer func() {
+		s.subsMu.Lock()
+		delete(s.subs, sub)
+		s.subsMu.Unlock()
+	}()
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -343,10 +367,37 @@ func (s *Server) applyParse(r cache.ParseResult) {
 	}
 	if r.FullTable != "" {
 		s.cache.InvalidateTable(r.FullTable)
+		s.broadcastInvalidation(r.FullTable, "")
 		return
 	}
 	for _, e := range r.Entries {
 		s.cache.Invalidate(e.Table, e.Key)
+		s.broadcastInvalidation(e.Table, e.Key)
+	}
+}
+
+// invalidationEvent is the unsolicited frame format. Distinguished from
+// a transportResponse by the empty ID and non-empty Event field; the JS
+// bridge routes on Event.
+type invalidationEvent struct {
+	ID    string `json:"id,omitempty"`
+	Event string `json:"event"`
+	Table string `json:"table"`
+	Key   string `json:"key,omitempty"`
+}
+
+func (s *Server) broadcastInvalidation(table, key string) {
+	event := invalidationEvent{Event: "invalidate", Table: table, Key: key}
+	s.subsMu.RLock()
+	subs := make([]*transportSub, 0, len(s.subs))
+	for sub := range s.subs {
+		subs = append(subs, sub)
+	}
+	s.subsMu.RUnlock()
+	for _, sub := range subs {
+		sub.writeMu.Lock()
+		_ = sub.encoder.Encode(event)
+		sub.writeMu.Unlock()
 	}
 }
 
@@ -367,6 +418,7 @@ func (s *Server) cacheInvalidate(req transportRequest) (interface{}, time.Durati
 	} else {
 		s.cache.Invalidate(req.Table, req.Key)
 	}
+	s.broadcastInvalidation(req.Table, req.Key)
 	return map[string]interface{}{"ok": true}, 0, nil
 }
 
