@@ -104,12 +104,22 @@ local tx = exports.spacedb:transaction({
 | `spacedb_core_platform` | `windows` | Set to `linux` on Linux servers |
 | `spacedb_core_mode` | `restart` | `restart` kills any process owning the transport port and starts fresh on every resource boot. `reuse` keeps an existing running core if one already responds on `/health` |
 | `spacedb_request_timeout_ms` | `30000` | Per-request TCP timeout. Pending promises reject with `spacedb timeout after Nms` if the core never replies |
+| `spacedb_mirror_max_entries` | `10000` | Max rows kept in the JS-side cache mirror. Tier-1 hits skip the TCP round trip |
 
 The bridge supervises the spawned core. On unexpected exit it rejects in-flight requests, holds new ones until respawn finishes, and retries with backoff (200 ms → 400 → 800 → ... capped at 5 s). Crashes during heavy load surface as a single batch of rejected promises plus a `core exited unexpectedly` log line rather than silent timeouts.
 
 ## In-process read cache
 
-For hot key lookups, spacedb has a Go-side row cache keyed by `(table, primary_key)`. Read-through on miss, manual write-through. Single-process, sharded, LRU-evicted, optional TTL.
+Two-tier row cache for hot key lookups, keyed by `(table, primary_key)`:
+
+```
+Lua caller
+  └─► JS bridge (Node) ─── tier 1: in-process LRU mirror, ~5-50 µs hit
+                       └─► Go core (TCP) ── tier 2: sharded cache, ~50 µs hit
+                                          └─► MySQL ── 1-3 ms RTT
+```
+
+Tier 1 hits skip the TCP round trip entirely. Tier 2 catches the JS-mirror miss in the Go cache before falling back to MySQL. Both tiers stay coherent: the Go core broadcasts invalidation events over the existing transport socket whenever a write dirties a row, and the JS mirror drops the entry on receipt. Writes also pre-invalidate the JS mirror by table before sending the SQL so a `getById` immediately after a write cannot race the broadcast.
 
 ```lua
 -- Get-by-id with read-through. Cache miss does SELECT * FROM users WHERE id = ?
@@ -118,6 +128,13 @@ local user = exports.spacedb:getById('users', 5)
 
 -- Non-standard PK column? Pass it as the third arg.
 local row = exports.spacedb:getById('player_inventory', 'abc-license', 'license')
+
+-- Batch read. ONE export call returns N rows. Amortizes the FiveM Lua↔JS
+-- export overhead across the whole batch — load 100 player records in
+-- the same wall-clock budget as a single getById would cost. Cache misses
+-- collapse into one `SELECT * WHERE id IN (?, ?, ...)`. Rows come back in
+-- the same order as the keys, with `nil` for keys that have no DB row.
+local rows = exports.spacedb:getMany('users', { 1, 2, 3, 5, 8 })
 
 -- After an update, push the new row back into the cache. Until Phase 3 ships,
 -- callers are responsible for cache freshness on writes.
@@ -135,7 +152,15 @@ local s = exports.spacedb:cacheStats()
 
 Identifier validation: `table` and `pkColumn` must match `^[A-Za-z_][A-Za-z0-9_]*$`. Anything else (spaces, semicolons, backticks) is rejected before reaching the SQL driver.
 
-Default capacity: 100 000 entries. Eviction is LRU. No TTL by default — entries live until invalidated or evicted.
+Default capacity: 100 000 entries Go-side, 10 000 entries JS-mirror. Eviction is LRU on both tiers. No TTL by default — entries live until invalidated or evicted. Tune the mirror size via `setr spacedb_mirror_max_entries <N>`.
+
+`cacheStats()` now returns both tiers:
+
+```lua
+local s = exports.spacedb:cacheStats()
+-- s.server.hits / .misses / .entries / .evictions  (Go-side)
+-- s.mirror.entries / .hits                          (JS-side)
+```
 
 **Auto-invalidation**: every `execute`, `executeMany`, and `transaction` is parsed for the affected `(table, key)` pair. When the SQL matches a safe subset (e.g. `UPDATE users SET ... WHERE id = ?`, `DELETE FROM users WHERE id = ?`) the matching cache entry is dropped. SQL that doesn't match the safe subset (joins, multi-row WHERE, upserts) drops the entire table from the cache — correctness over efficiency. Plain `INSERT` is a no-op (a brand-new row can't be in the cache yet). So the typical pattern works without manual `invalidate` calls:
 

@@ -92,4 +92,48 @@ function createPendingMap({ schedule = setTimeout, cancel = clearTimeout } = {})
   return { add, complete, fail, markRecv, closeAll, size: () => pending.size, has: (id) => pending.has(id) };
 }
 
-module.exports = { parseAddress, consumeFrames, createPendingMap };
+// Tiny insertion-ordered LRU mirror of the Go-side row cache. Keyed by
+// `${table}\x00${key}`. Skips the TCP round trip on cache hits. Server
+// pushes invalidation events over the same socket to keep it coherent.
+function createMirror({ maxEntries = 10_000 } = {}) {
+  const map = new Map();
+
+  function get(table, key) {
+    const k = `${table}\x00${key}`;
+    if (!map.has(k)) return undefined;
+    const row = map.get(k);
+    // Touch: re-insert to move to back of insertion order (LRU tail).
+    map.delete(k);
+    map.set(k, row);
+    return row;
+  }
+
+  function set(table, key, row) {
+    const k = `${table}\x00${key}`;
+    if (map.has(k)) map.delete(k);
+    map.set(k, row);
+    if (map.size > maxEntries) {
+      // Evict oldest (insertion order = LRU head).
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
+    }
+  }
+
+  function invalidate(table, key) {
+    map.delete(`${table}\x00${key}`);
+  }
+
+  function invalidateTable(table) {
+    const prefix = `${table}\x00`;
+    for (const k of map.keys()) {
+      if (k.startsWith(prefix)) map.delete(k);
+    }
+  }
+
+  function size() { return map.size; }
+  function clear() { map.clear(); }
+
+  return { get, set, invalidate, invalidateTable, size, clear };
+}
+
+module.exports = { parseAddress, consumeFrames, createPendingMap, createMirror };
