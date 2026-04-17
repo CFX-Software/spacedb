@@ -1,6 +1,6 @@
 const net = require('net');
 const path = require('path');
-const { parseAddress, consumeFrames, createPendingMap } = require('./server/js/protocol');
+const { parseAddress, consumeFrames, createPendingMap, createMirror } = require('./server/js/protocol');
 const { ensureCore } = require('./server/js/lifecycle');
 
 const endpoint = GetConvar('spacedb_endpoint', 'http://127.0.0.1:37120');
@@ -12,6 +12,9 @@ const resourceName = GetCurrentResourceName();
 const resourceRoot = GetResourcePath(resourceName);
 const subscriptions = new Set();
 const pending = createPendingMap();
+const mirrorMax = Number(GetConvar('spacedb_mirror_max_entries', '10000')) || 10000;
+const mirror = createMirror({ maxEntries: mirrorMax });
+let mirrorHits = 0;
 let nextId = 0;
 let socket = null;
 let buffer = '';
@@ -118,7 +121,13 @@ function connectTransport() {
           console.log(`[spacedb] invalid tcp response: ${line}`);
           return;
         }
-        // Stamp recv hrtime before complete so wantsMeta callers see it.
+        // Unsolicited events from the server (cache invalidations, etc.)
+        // arrive without an id. Route on the event field.
+        if (payload.event === 'invalidate') {
+          if (payload.key) mirror.invalidate(payload.table, payload.key);
+          else mirror.invalidateTable(payload.table);
+          return;
+        }
         pending.markRecv(payload.id, recvNs);
         pending.complete(payload.id, payload);
       });
@@ -202,6 +211,18 @@ async function transport(op, payload, opts = {}) {
   });
 }
 
+// Best-effort extraction of the affected table from a write statement so
+// the JS mirror can be invalidated *before* the server's invalidation
+// event arrives (defense against the read-after-write race). The Go
+// parser is authoritative; this is just a fast preemptive purge.
+const writeTableRe = /^\s*(?:update|delete\s+from|insert\s+into|replace\s+into|truncate(?:\s+table)?)\s+([A-Za-z_][A-Za-z0-9_]*)/i;
+function preInvalidateMirror(sql) {
+  if (typeof sql !== 'string') return;
+  const m = sql.match(writeTableRe);
+  if (m) mirror.invalidateTable(m[1]);
+  else mirror.clear(); // unknown shape — be safe
+}
+
 function query(sqlOrName, params = []) {
   return transport('query', { query: sqlOrName, params });
 }
@@ -211,6 +232,7 @@ function single(sqlOrName, params = []) {
 }
 
 function execute(sqlOrName, params = []) {
+  preInvalidateMirror(sqlOrName);
   return transport('execute', { query: sqlOrName, params });
 }
 
@@ -222,31 +244,51 @@ function queryProfiled(sqlOrName, params = []) {
   return transport('query', { query: sqlOrName, params }, { profile: true });
 }
 
-// In-process read cache. PK column defaults to "id".
+// In-process read cache. Two-tier: JS mirror (in-process Node memory)
+// → Go cache (in-process Go memory) → MySQL. Mirror hits skip the TCP
+// round trip entirely and return in <100 µs. PK defaults to "id".
 async function getById(table, key, pkColumn = 'id') {
-  const result = await transport('cacheGet', { table, key: String(key), pkColumn });
-  return result && result.row != null ? result.row : null;
+  const skey = String(key);
+  const cached = mirror.get(table, skey);
+  if (cached !== undefined) {
+    mirrorHits += 1;
+    return cached;
+  }
+  const result = await transport('cacheGet', { table, key: skey, pkColumn });
+  const row = result && result.row != null ? result.row : null;
+  if (row !== null) mirror.set(table, skey, row);
+  return row;
 }
 
 // Pure cache update — caller is responsible for persisting the row via
-// execute/insert/update first. Phase 3 will auto-invalidate on writes.
-function setById(table, key, row) {
-  return transport('cacheSet', { table, key: String(key), row });
+// execute/insert/update first. Updates both tiers.
+async function setById(table, key, row) {
+  const skey = String(key);
+  mirror.set(table, skey, row);
+  return transport('cacheSet', { table, key: skey, row });
 }
 
-function invalidate(table, key) {
-  return transport('cacheInvalidate', { table, key: String(key) });
+async function invalidate(table, key) {
+  const skey = String(key);
+  mirror.invalidate(table, skey);
+  return transport('cacheInvalidate', { table, key: skey });
 }
 
-function invalidateTable(table) {
+async function invalidateTable(table) {
+  mirror.invalidateTable(table);
   return transport('cacheInvalidate', { table });
 }
 
-function cacheStats() {
-  return transport('cacheStats', {});
+async function cacheStats() {
+  const remote = await transport('cacheStats', {});
+  return {
+    server: remote,
+    mirror: { entries: mirror.size(), hits: mirrorHits },
+  };
 }
 
 function executeMany(sqlOrName, rows = []) {
+  preInvalidateMirror(sqlOrName);
   return transport('executeMany', { query: sqlOrName, rows });
 }
 
@@ -255,6 +297,9 @@ function prepare(name, sql, options = {}) {
 }
 
 function transaction(steps = []) {
+  for (const step of steps || []) {
+    if (step && typeof step.query === 'string') preInvalidateMirror(step.query);
+  }
   return transport('transaction', { steps });
 }
 
