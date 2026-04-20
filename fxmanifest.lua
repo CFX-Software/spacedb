@@ -28,6 +28,7 @@ server_exports {
     'executeProfiled',
     'queryProfiled',
     'getById',
+    'getMany',
     'setById',
     'invalidate',
     'invalidateTable',

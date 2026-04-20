@@ -472,9 +472,51 @@ local function run()
     runSequential('oxmysql real single by id (no cache)', function()
         awaitOxmysql('single', 'SELECT * FROM spacedb_bench_items WHERE id = ?', { 999999 })
     end)
+    -- Batched read. Same logical work as 1000 sequential getById calls but
+    -- amortized over ONE FiveM export call. Compared against OxMySQL's
+    -- best equivalent — a single SELECT ... WHERE id IN (?,?,?,...).
+    do
+        -- Seed 100 rows so the IN clause has real targets. (We already have
+        -- id=999999 from the cache phase above; add 99 more.)
+        local seedRows = {}
+        local seedIds = {}
+        for i = 1, 99 do
+            seedRows[i] = { 'getMany-target', i }
+            seedIds[i] = 800000 + i
+        end
+        for i = 1, 99 do
+            exports.spacedb:execute(
+                'INSERT INTO spacedb_bench_items (id, name, score) VALUES (?, ?, ?)',
+                { seedIds[i], 'getMany-target', i }
+            )
+        end
+        local keys = { 999999 }
+        for i = 1, 99 do keys[#keys + 1] = seedIds[i] end
+
+        -- Prime cache once
+        exports.spacedb:getMany('spacedb_bench_items', keys)
+
+        local function buildInList(n)
+            local q = {}
+            for i = 1, n do q[i] = '?' end
+            return 'SELECT * FROM spacedb_bench_items WHERE id IN (' .. table.concat(q, ',') .. ')'
+        end
+        local inSql = buildInList(#keys)
+
+        runSequential('spacedb getMany batch (100 keys)', function()
+            exports.spacedb:getMany('spacedb_bench_items', keys)
+        end)
+        runSequential('oxmysql query IN (100 keys)', function()
+            awaitOxmysql('query', inSql, keys)
+        end)
+    end
+
     local cacheStats = exports.spacedb:cacheStats()
-    log(('cache stats hits=%d misses=%d entries=%d'):format(
-        cacheStats.hits or 0, cacheStats.misses or 0, cacheStats.entries or 0))
+    local server = cacheStats.server or {}
+    local mirror = cacheStats.mirror or {}
+    log(('cache stats server=%d/%d/%d (h/m/e) mirror=%d/%d (h/e)'):format(
+        server.hits or 0, server.misses or 0, server.entries or 0,
+        mirror.hits or 0, mirror.entries or 0))
 
     printSummary()
     exports.spacedb:execute('DROP TABLE IF EXISTS spacedb_bench_items', {})

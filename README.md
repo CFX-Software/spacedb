@@ -129,6 +129,13 @@ local user = exports.spacedb:getById('users', 5)
 -- Non-standard PK column? Pass it as the third arg.
 local row = exports.spacedb:getById('player_inventory', 'abc-license', 'license')
 
+-- Batch read. ONE export call returns N rows. Amortizes the FiveM Lua↔JS
+-- export overhead across the whole batch — load 100 player records in
+-- the same wall-clock budget as a single getById would cost. Cache misses
+-- collapse into one `SELECT * WHERE id IN (?, ?, ...)`. Rows come back in
+-- the same order as the keys, with `nil` for keys that have no DB row.
+local rows = exports.spacedb:getMany('users', { 1, 2, 3, 5, 8 })
+
 -- After an update, push the new row back into the cache. Until Phase 3 ships,
 -- callers are responsible for cache freshness on writes.
 exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })

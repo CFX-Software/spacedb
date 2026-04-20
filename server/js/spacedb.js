@@ -260,6 +260,43 @@ async function getById(table, key, pkColumn = 'id') {
   return row;
 }
 
+// Batched read. One export call returns N rows. Amortizes the FiveM
+// Lua↔JS export overhead across the whole batch; per-row cost drops to
+// microseconds on a warm cache. Returns rows in input-key order, with
+// `null` for keys that have no matching row.
+async function getMany(table, keys, pkColumn = 'id') {
+  if (!Array.isArray(keys) || keys.length === 0) return [];
+  const out = new Array(keys.length);
+  const misses = [];
+  const missIndexes = [];
+  for (let i = 0; i < keys.length; i += 1) {
+    const skey = String(keys[i]);
+    const cached = mirror.get(table, skey);
+    if (cached !== undefined) {
+      out[i] = cached;
+      mirrorHits += 1;
+    } else {
+      misses.push(keys[i]);
+      missIndexes.push(i);
+    }
+  }
+  if (misses.length === 0) return out;
+
+  const result = await transport('cacheGetMany', { table, keys: misses, pkColumn });
+  const rows = (result && result.rows) || {};
+  for (let i = 0; i < missIndexes.length; i += 1) {
+    const skey = String(misses[i]);
+    const row = rows[skey];
+    if (row != null) {
+      mirror.set(table, skey, row);
+      out[missIndexes[i]] = row;
+    } else {
+      out[missIndexes[i]] = null;
+    }
+  }
+  return out;
+}
+
 // Pure cache update — caller is responsible for persisting the row via
 // execute/insert/update first. Updates both tiers.
 async function setById(table, key, row) {
@@ -347,6 +384,7 @@ exports('stats', stats);
 exports('executeProfiled', executeProfiled);
 exports('queryProfiled', queryProfiled);
 exports('getById', getById);
+exports('getMany', getMany);
 exports('setById', setById);
 exports('invalidate', invalidate);
 exports('invalidateTable', invalidateTable);
