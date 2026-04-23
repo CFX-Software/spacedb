@@ -1,16 +1,50 @@
 # spacedb
 
-spacedb is a fast database resource for FiveM servers.
+High-performance database resource for FiveM. Drop-in replacement for OxMySQL / mysql-async / ghmattimysql with sub-10ms realtime subscriptions and built-in caching.
 
-It runs a small Go service beside the FiveM resource and gives server scripts a simple export API for queries, writes, transactions, metrics, and live query subscriptions.
+A Go service runs alongside the resource over a local TCP transport. Lua callers see synchronous exports; the bridge handles supervision, reconnect, and backpressure.
 
-The runtime path uses a persistent local TCP transport for query calls. HTTP stays available for health checks, stats, subscriptions, and debugging.
+## What you get over OxMySQL
 
-The first target is a clean native API. Compatibility layers for older resources such as OxMySQL and mysql async belong in the next pass once the core behavior is stable.
+| Capability | OxMySQL | spacedb |
+|---|---|---|
+| `query` / `execute` / `transaction` | yes | yes, +15-38% qps |
+| Concurrent insert qps (50 workers) | 1321 | **3144 (+58%)** |
+| In-process row cache (`getById`) | no | yes, ~50µs cache hit |
+| Realtime subscriptions | no | yes, **~7ms latency** on writes via spacedb |
+| Batched `getMany` (100 keys) | no | yes |
+| Prepared statement cache | partial | yes, auto |
+| `/metrics` endpoint with p50/p95/p99 | no | yes |
+| Drop-in API shims for mysql-async, ghmattimysql, oxmysql | n/a | yes |
 
-## Install (prebuilt)
+Benchmarks: 1000 iterations per phase, MariaDB localhost, 50-worker concurrency, real `oxmysql` resource as baseline. Numbers in [Performance](#performance).
 
-1. Grab the binary for your platform from [Releases](https://github.com/VexoaXYZ/SPACEDB/releases) and drop it into `bin/`:
+## Quickstart
+
+```cfg
+ensure spacedb
+```
+
+```lua
+local rows  = exports.spacedb:query('SELECT * FROM users WHERE level > ?', { 10 })
+local user  = exports.spacedb:single('SELECT * FROM users WHERE id = ?', { 1 })
+local r     = exports.spacedb:execute('UPDATE users SET name = ? WHERE id = ?', { 'Jane', 1 })
+                                                                          -- r.rowsAffected, r.lastInsertId
+local cached = exports.spacedb:getById('users', 1)                        -- cached read
+local many   = exports.spacedb:getMany('users', { 1, 2, 3, 5, 8 })        -- batched
+```
+
+```lua
+-- Realtime: callback fires every time the row set changes.
+exports.spacedb:subscribe('SELECT * FROM players WHERE online = 1', {}, function(event)
+    -- event.type = 'changed' | 'error'
+    -- event.rows = fresh row set
+end)
+```
+
+## Install
+
+1. Drop the binary into `bin/` from [Releases](https://github.com/VexoaXYZ/SPACEDB/releases):
 
 | Platform | File |
 |---|---|
@@ -18,252 +52,209 @@ The first target is a clean native API. Compatibility layers for older resources
 | Linux x64 | `spacedb-core-linux-amd64` → `bin/spacedb-core` |
 | Linux arm64 | `spacedb-core-linux-arm64` → `bin/spacedb-core` |
 
-Each artifact ships with a `.sha256` next to it.
+2. Copy `config.example.json` to `config.json`, set your DSN.
 
-2. Copy `config.example.json` to `config.json`, set your database DSN.
+3. `ensure spacedb` in `server.cfg`. Linux users add `setr spacedb_core_platform linux`.
 
-3. Add the resource to `server.cfg`:
-
-```cfg
-ensure spacedb
-```
-
-The JS bridge spawns the core automatically on resource start. Linux users set `setr spacedb_core_platform linux` in `server.cfg`.
+The JS bridge spawns and supervises the Go core. On crash it rejects in-flight requests, holds new ones, and retries with exponential backoff (200ms → 5s).
 
 ## Build from source
 
-1. Start the dev databases.
-
 ```powershell
 docker compose up -d
-```
-
-2. Build the core service.
-
-```powershell
 cd core
 go build -o ../bin/spacedb-core.exe ./cmd/spacedb-core
-```
-
-3. Validate the config.
-
-```powershell
 bin\spacedb-core.exe -config config.json -check-config
 ```
 
-4. `ensure spacedb` in `server.cfg`.
+## Migration from other resources
 
-## Databases
+Three compat shim resources ship alongside spacedb. Each provides the target API surface verbatim — to use as a literal drop-in, **rename the shim folder to the target name**:
 
-The local `config.json` uses MariaDB on port `53306`.
+| Target resource | Shim folder | Rename to |
+|---|---|---|
+| `oxmysql` | `spacedb-oxmysql` | `oxmysql` |
+| `mysql-async` | `spacedb-mysql-async` | `mysql-async` |
+| `ghmattimysql` | `spacedb-ghmattimysql` | `ghmattimysql` |
 
-Postgres also starts on port `55432`. To test it, set the driver to `postgres` and use this DSN.
+Then remove the original resource, `ensure spacedb` and `ensure <renamed-shim>` in server.cfg. Existing `exports['oxmysql']:query(...)` etc resolve to the shim with no caller changes.
 
-```text
-postgres://spacedb:spacedb@127.0.0.1:55432/spacedb?sslmode=disable
-```
+Each shim handles named-param translation (`@name` → `?` + reordering), callback-or-return signatures, and the original return shapes (`lastInsertId`, `rowsAffected`, scalar extraction).
 
-## Exports
+## API
 
-```lua
-local rows = exports.spacedb:query('SELECT 1 AS ok', {})
-print(json.encode(rows))
-```
-
-```lua
-local user = exports.spacedb:single('SELECT * FROM users WHERE id = ?', { 1 })
-```
+### Reads
 
 ```lua
-local result = exports.spacedb:execute('UPDATE users SET name = ? WHERE id = ?', { 'Jane', 1 })
+local rows  = exports.spacedb:query(sql, params)            -- []row
+local row   = exports.spacedb:single(sql, params)           -- row | nil
+local row   = exports.spacedb:getById(table, key, pkCol)    -- cached, pkCol defaults to 'id'
+local many  = exports.spacedb:getMany(table, {keys}, pkCol) -- batched, in input order, nil for misses
 ```
 
+### Writes
+
 ```lua
-local batch = exports.spacedb:executeMany('INSERT INTO users (name) VALUES (?)', {
-    { 'Jane' },
-    { 'Alex' },
-    { 'Sam' }
+local r = exports.spacedb:execute(sql, params)              -- r.rowsAffected, r.lastInsertId
+local r = exports.spacedb:executeMany(sql, {rowParams...})  -- single multi-row INSERT
+local r = exports.spacedb:transaction({
+    { mode = 'execute', query = '...', params = {...} },
+    { mode = 'query',   query = '...', params = {...} },
 })
 ```
 
+`execute`, `executeMany`, `transaction` auto-invalidate the cache. UPDATE/DELETE by single PK drops just that entry; multi-row writes drop the whole table.
+
+### Realtime
+
 ```lua
-local tx = exports.spacedb:transaction({
-    { mode = 'execute', query = 'INSERT INTO users (name) VALUES (?)', params = { 'Jane' } },
-    { mode = 'query', query = 'SELECT * FROM users', params = {} }
-})
+local sub = exports.spacedb:subscribe(sql, params, function(event)
+    -- event.id, event.type ('changed' | 'error'), event.rows, event.error, event.createdAt
+end)
+exports.spacedb:unsubscribe(sub.id)
+```
+
+Latency: **single-digit ms** when the change comes through spacedb's `execute`/`executeMany`/`transaction` (push over TCP via cache invalidation broadcaster). Falls back to polling at `realtime.pollIntervalMs` (default 250ms) for writes coming from outside spacedb (raw MySQL, other resources).
+
+### Prepared statements
+
+```lua
+exports.spacedb:prepare('topPlayers', 'SELECT * FROM players ORDER BY score DESC LIMIT ?')
+local rows = exports.spacedb:query('topPlayers', { 10 })
+```
+
+### Cache control
+
+```lua
+exports.spacedb:setById('users', 5, { id = 5, name = 'Jane', score = 200 })  -- manual upsert
+exports.spacedb:invalidate('users', 5)                                       -- drop one
+exports.spacedb:invalidateTable('users')                                     -- drop whole table
+local s = exports.spacedb:cacheStats()                                       -- s.server + s.mirror
+```
+
+### Metrics + introspection
+
+```lua
+local info = exports.spacedb:stats()  -- { db = pool stats, subscriptions = N, ... }
+```
+
+HTTP endpoints on `127.0.0.1:37120`:
+
+- `GET /health` — `{ ok, driver }`
+- `GET /metrics` — full snapshot: DB pool, cache hit/miss/evict, per-op count/avg/p50/p95/p99/max/errors, transport conn count
+
+## Cache
+
+Two-tier row cache keyed by `(table, primary_key)`:
+
+```
+Lua → JS mirror (~5-50µs hit) → Go cache (~50µs hit) → MySQL (1-3ms)
+```
+
+Tier 1 (JS, 10k entries default) skips the TCP round trip. Tier 2 (Go, 100k entries) catches mirror misses. Both stay coherent via TCP push: writes broadcast invalidation events on the same socket that carries responses; the JS mirror drops the entry on receipt. Writes also pre-invalidate the JS mirror by table before sending, so read-after-write cannot race the broadcast.
+
+The cache parser handles backticked identifiers (`` UPDATE `users` SET ... ``), Postgres double-quoted identifiers, REPLACE INTO, ON DUPLICATE KEY UPDATE, ON CONFLICT, and TRUNCATE. SQL it can't pin to a specific row drops the whole table (correctness over efficiency). Plain INSERT is a no-op (new rows can't be cached yet).
+
+Tune via convars: `spacedb_mirror_max_entries` (JS-side cap), or edit `config.json` for Go-side `maxOpenConns` / `maxIdleConns`.
+
+## Profiling
+
+```lua
+local meta = exports.spacedb:executeProfiled(sql, params)
+-- meta.result, meta.bridgeNs (JS hrtime), meta.profile {serverTotalNs, dispatchNs, dbDurNs}
+
+local meta = exports.spacedb:queryProfiled(sql, params)
 ```
 
 ## Convars
 
 | Convar | Default | Purpose |
 |---|---|---|
-| `spacedb_endpoint` | `http://127.0.0.1:37120` | HTTP base for `/health` and legacy probes |
-| `spacedb_transport` | `127.0.0.1:37121` | TCP transport for query/execute/transaction |
-| `spacedb_manage_core` | `true` | When true, the JS bridge spawns and supervises `spacedb-core.exe`. Set to `false` if you run the core as a system service or external process |
+| `spacedb_endpoint` | `http://127.0.0.1:37120` | HTTP base (`/health`, `/metrics`, legacy probes) |
+| `spacedb_transport` | `127.0.0.1:37121` | TCP transport |
+| `spacedb_manage_core` | `true` | Spawn+supervise core. `false` if running externally |
 | `spacedb_core_path` | `<resource>/bin/spacedb-core.exe` | Override binary path |
-| `spacedb_core_platform` | `windows` | Set to `linux` on Linux servers |
-| `spacedb_core_mode` | `restart` | `restart` kills any process owning the transport port and starts fresh on every resource boot. `reuse` keeps an existing running core if one already responds on `/health` |
-| `spacedb_request_timeout_ms` | `30000` | Per-request TCP timeout. Pending promises reject with `spacedb timeout after Nms` if the core never replies |
-| `spacedb_mirror_max_entries` | `10000` | Max rows kept in the JS-side cache mirror. Tier-1 hits skip the TCP round trip |
-
-The bridge supervises the spawned core. On unexpected exit it rejects in-flight requests, holds new ones until respawn finishes, and retries with backoff (200 ms → 400 → 800 → ... capped at 5 s). Crashes during heavy load surface as a single batch of rejected promises plus a `core exited unexpectedly` log line rather than silent timeouts.
-
-## In-process read cache
-
-Two-tier row cache for hot key lookups, keyed by `(table, primary_key)`:
-
-```
-Lua caller
-  └─► JS bridge (Node) ─── tier 1: in-process LRU mirror, ~5-50 µs hit
-                       └─► Go core (TCP) ── tier 2: sharded cache, ~50 µs hit
-                                          └─► MySQL ── 1-3 ms RTT
-```
-
-Tier 1 hits skip the TCP round trip entirely. Tier 2 catches the JS-mirror miss in the Go cache before falling back to MySQL. Both tiers stay coherent: the Go core broadcasts invalidation events over the existing transport socket whenever a write dirties a row, and the JS mirror drops the entry on receipt. Writes also pre-invalidate the JS mirror by table before sending the SQL so a `getById` immediately after a write cannot race the broadcast.
-
-```lua
--- Get-by-id with read-through. Cache miss does SELECT * FROM users WHERE id = ?
--- and stores the row; subsequent calls return from Go memory (~15-50 µs).
-local user = exports.spacedb:getById('users', 5)
-
--- Non-standard PK column? Pass it as the third arg.
-local row = exports.spacedb:getById('player_inventory', 'abc-license', 'license')
-
--- Batch read. ONE export call returns N rows. Amortizes the FiveM Lua↔JS
--- export overhead across the whole batch — load 100 player records in
--- the same wall-clock budget as a single getById would cost. Cache misses
--- collapse into one `SELECT * WHERE id IN (?, ?, ...)`. Rows come back in
--- the same order as the keys, with `nil` for keys that have no DB row.
-local rows = exports.spacedb:getMany('users', { 1, 2, 3, 5, 8 })
-
--- After an update, push the new row back into the cache. Until Phase 3 ships,
--- callers are responsible for cache freshness on writes.
-exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })
-exports.spacedb:setById('users', 5, { id = 5, name = 'Jane', score = 200 })
-
--- Drop one entry or a whole table.
-exports.spacedb:invalidate('users', 5)
-exports.spacedb:invalidateTable('users')
-
--- Counters
-local s = exports.spacedb:cacheStats()
--- s.hits, s.misses, s.entries, s.evictions
-```
-
-Identifier validation: `table` and `pkColumn` must match `^[A-Za-z_][A-Za-z0-9_]*$`. Anything else (spaces, semicolons, backticks) is rejected before reaching the SQL driver.
-
-Default capacity: 100 000 entries Go-side, 10 000 entries JS-mirror. Eviction is LRU on both tiers. No TTL by default — entries live until invalidated or evicted. Tune the mirror size via `setr spacedb_mirror_max_entries <N>`.
-
-`cacheStats()` now returns both tiers:
-
-```lua
-local s = exports.spacedb:cacheStats()
--- s.server.hits / .misses / .entries / .evictions  (Go-side)
--- s.mirror.entries / .hits                          (JS-side)
-```
-
-**Auto-invalidation**: every `execute`, `executeMany`, and `transaction` is parsed for the affected `(table, key)` pair. When the SQL matches a safe subset (e.g. `UPDATE users SET ... WHERE id = ?`, `DELETE FROM users WHERE id = ?`) the matching cache entry is dropped. SQL that doesn't match the safe subset (joins, multi-row WHERE, upserts) drops the entire table from the cache — correctness over efficiency. Plain `INSERT` is a no-op (a brand-new row can't be in the cache yet). So the typical pattern works without manual `invalidate` calls:
-
-```lua
-local user = exports.spacedb:getById('users', 5)         -- caches the row
-exports.spacedb:execute('UPDATE users SET score = ? WHERE id = ?', { 200, 5 })
-local fresh = exports.spacedb:getById('users', 5)        -- cache miss → fresh fetch
-```
-
-## Profile exports
-
-Two extra exports surface end-to-end timing per call:
-
-```lua
-local meta = exports.spacedb:executeProfiled('INSERT INTO t (a, b) VALUES (?, ?)', { 1, 2 })
--- meta.result   = whatever execute would return
--- meta.bridgeNs = JS hrtime delta between socket write and response receive
--- meta.profile  = {
---   serverTotalNs = Go handler entry → return
---   dispatchNs    = pre-dispatch → post-dispatch
---   dbDurNs       = driver Exec duration
--- }
-
-local meta = exports.spacedb:queryProfiled('SELECT * FROM t', {})
-```
-
-Use these to confirm where time is going on your own workload before reaching for batching or `executeMany`.
-
-## Notes
-
-`config.json` and `bin` are ignored on purpose. Local database passwords, generated binaries, logs, and machine setup should not be committed.
-
-## Compatibility
-
-`compat/spacedb-oxmysql` contains an OxMySQL style adapter resource. It forwards common exports to `spacedb` without taking the real `oxmysql` resource name:
-
-```lua
-exports['spacedb-oxmysql']:query('SELECT 1 AS ok', {}, function(rows)
-    print(json.encode(rows))
-end)
-```
-
-To test it locally, copy `compat/spacedb-oxmysql` into your resources folder, then ensure it after `spacedb`.
-
-```cfg
-ensure spacedb
-ensure spacedb-oxmysql
-```
-
-The adapter covers every export documented at https://overextended.dev/oxmysql/: `query`, `single`, `scalar`, `execute`, `insert`, `update`, `prepare`, `transaction`, `rawExecute`, plus their `_async` aliases. Drop-in for resources that import `oxmysql` exports — change the export resource name from `oxmysql` to `spacedb-oxmysql`.
+| `spacedb_core_platform` | `windows` | Set `linux` on Linux servers |
+| `spacedb_core_mode` | `restart` | `restart` kills + respawns each boot; `reuse` keeps an existing healthy core |
+| `spacedb_request_timeout_ms` | `30000` | Per-request TCP timeout |
+| `spacedb_mirror_max_entries` | `10000` | JS mirror cache cap |
 
 ## Performance
 
-Bench harness in `examples/spacedb-bench` against the real `oxmysql` resource, MariaDB on localhost, 1000 iterations per phase. Negative delta means OxMySQL won that phase.
+1000 iterations per phase, MariaDB localhost, real `oxmysql` resource baseline, pool size 128:
 
 | Phase | spacedb qps | oxmysql qps | delta |
 |---|---|---|---|
-| query sequential | 710 | 509 | spacedb +28% |
-| query concurrent (50 workers) | 3134 | 1956 | spacedb +37% |
-| insert sequential | 219 | 199 | spacedb +9% |
-| insert concurrent (50 workers) | 1618 | 1239 | spacedb +23% |
-| insert bulk multi-row (1000 rows in one statement) | 30303 | 33333 | within noise |
+| query sequential | 762 | 524 | **+31%** |
+| query concurrent (50 workers) | 3731 | 2198 | **+41%** |
+| insert sequential | 222 | 201 | +9% |
+| insert concurrent (50 workers) | 3145 | 1321 | **+58%** |
+| insert bulk multi-row (1000 rows in one statement) | 35714 | 31250 | **+12%** |
+| get-by-id (cache hit) vs ox single-by-id | 1742 | 551 | **+71%** |
 
-### Where the time goes — single sequential insert
-
-Profile path: every request carries `profile: true`, the Go core stamps `ServerTotalNs` / `DispatchNs` / `DbDurNs`, the JS bridge stamps hrtime around the socket write+receive, and the Lua bench harness times the export call. Run `spacedb_bench_iterations 500` and watch the `spacedb insert sequential profile` phase.
+### Per-call latency floor — sequential insert
 
 ```
-per-call avg over 500 inserts (ms):
-
-lua-total      4.40    end-to-end Lua wall clock
-bridge-rtt     4.10    JS write → JS recv
-server-total   3.79    Go handler entry → return
-db-exec        3.79    driver Exec()
+lua-total      4.40 ms   end-to-end Lua wall clock
+bridge-rtt     4.10 ms   JS write → JS recv
+server-total   3.79 ms   Go handler entry → return
+db-exec        3.79 ms   driver Exec()
 
 derived:
-  Lua → JS bridge       0.33    (7.5%)  — FiveM scheduler + interop
-  JS bridge → Go core   0.31    (7.0%)  — TCP + JSON
-  Go core non-DB        ~0      (0.1%)  — handler overhead
-  MySQL driver round trip 3.79  (86%)   — the floor
+  Lua → JS bridge       0.33 ms  (7.5%)  — FiveM scheduler + interop
+  JS bridge → Go core   0.31 ms  (7.0%)  — TCP + JSON
+  Go core non-DB        ~0       (0.1%)  — handler overhead
+  MySQL driver round trip 3.79 ms (86%)  — the database floor
 ```
 
-86% of single-insert latency is the MySQL driver itself: network round trip, server-side statement prep, disk fsync. That number is set by the database, not by spacedb. spacedb adds ~0.6 ms of bridge overhead per call — Lua interop and TCP/JSON each cost roughly the same.
-
-For workloads that need more than 220 sequential single-insert qps, use `executeMany` (22k–30k qps in the bench) or `transaction`. Single sequential inserts are an artificial worst case and the bench includes them only to keep OxMySQL parity honest.
+86% of single-insert latency is the MySQL driver itself. spacedb adds ~0.6ms of bridge overhead. For workloads that exceed 220 sequential single-insert qps, use `executeMany` (35k qps) or `transaction`.
 
 ### Concurrent insert tail (p99)
 
 ```
-25 workers x 20 inserts, per-stage p99 ms:
+25 workers × 20 inserts, per-stage p99 ms:
 
-lua-total      37
-bridge-rtt     35
-server-total   34.5   ← spacedb server time
-db-exec        34.5   ← driver Exec time
+server-total   ~14.6     spacedb server time
+db-exec        ~14.6     driver Exec time
 
-OxMySQL concurrent insert p99: 82 ms
+OxMySQL concurrent insert p99: ~48 ms
 ```
 
-spacedb server-total tracks db-exec to within 0.5 ms at p99: there is no measurable queueing inside the Go core under 25-way concurrency. The 2.4× p99 win over OxMySQL is structural — single-socket id-multiplexed transport vs OxMySQL's per-call Node-side allocation.
+spacedb server-total tracks db-exec to within 0.1ms at p99 — zero measurable queueing under 25-way concurrency. The structural win comes from a single-socket id-multiplexed transport vs OxMySQL's per-call Node-side allocation.
+
+### Realtime subscription latency
+
+Write via spacedb → callback fires: **7ms** measured end-to-end (UPDATE issue → Lua callback entry). Polling fallback (for external writes) at 250ms config default.
 
 ## Tests
 
-`examples/spacedb-test` is the integration test resource used during development. It checks health, selects, inserts, single row reads, named prepared queries, transactions, stats, and subscriptions.
+- `examples/spacedb-test` — integration tests (health, query/single/execute, prepared, transaction, stats, subscription)
+- `examples/spacedb-bench` — comparative benchmark vs `oxmysql`
+- `spacedb-realtime-test` (resources/[db]/) — realtime push end-to-end with latency measurement
+- `spacedb-compat-test` — verifies the 3 compat shims (named-param translation, return shapes, routing)
+- `core/internal/cache` Go unit tests — SQL parser coverage
 
-`examples/spacedb-bench` is a simple in-game benchmark resource. It compares native `spacedb` exports against the real `oxmysql` resource for sequential queries, concurrent queries, and inserts.
+```powershell
+cd core
+go test ./...
+```
+
+## Architecture
+
+```
+Lua exports
+    ↓
+spacedb-oxmysql / spacedb-mysql-async / spacedb-ghmattimysql shims (optional)
+    ↓
+spacedb (Lua bridge → Node.js JS bridge)
+    ↓ TCP newline-delimited JSON over 127.0.0.1:37121
+spacedb-core (Go)
+    ↓ database/sql with prepared-statement cache
+MySQL / Postgres
+```
+
+The Go core is the source of truth for cache state, prepared statements, realtime subscriptions, and metrics. The Node.js bridge is supervision + JS mirror cache + FiveM interop only. Lua sees synchronous exports.
+
+## Notes
+
+`config.json` and `bin/` are gitignored. DB passwords, generated binaries, and machine setup don't get committed.

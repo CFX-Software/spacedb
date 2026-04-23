@@ -156,18 +156,30 @@ func (s *Store) ExecuteMany(ctx context.Context, query string, rows [][]interfac
 		return s.executeManyTransaction(ctx, query, rows, start)
 	}
 
+	// MySQL binary protocol caps total bound params at 65535 per statement;
+	// keep headroom and pick a target chunk so most batches are a single round-trip.
+	const targetRowsPerChunk = 10000
+	maxRowsByProtocol := 65000 / placeholders
+	if maxRowsByProtocol < 1 {
+		maxRowsByProtocol = 1
+	}
+	chunkSize := targetRowsPerChunk
+	if chunkSize > maxRowsByProtocol {
+		chunkSize = maxRowsByProtocol
+	}
+
 	total := ExecResult{}
-	for i := 0; i < len(rows); i += 500 {
-		end := i + 500
+	for i := 0; i < len(rows); i += chunkSize {
+		end := i + chunkSize
 		if end > len(rows) {
 			end = len(rows)
 		}
+		count := end - i
 
-		sqlText, params, err := builder(end - i)
+		sqlText, params, err := builder(count)
 		if err != nil {
 			return ExecResult{}, time.Since(start), err
 		}
-		params = params[:0]
 		for _, row := range rows[i:end] {
 			if len(row) != placeholders {
 				return ExecResult{}, time.Since(start), fmt.Errorf("executeMany row has %d params, expected %d", len(row), placeholders)
@@ -175,7 +187,11 @@ func (s *Store) ExecuteMany(ctx context.Context, query string, rows [][]interfac
 			params = append(params, row...)
 		}
 
-		result, err := s.sqlDB.ExecContext(ctx, s.rebind(sqlText), params...)
+		stmt, err := s.statement(ctx, sqlText)
+		if err != nil {
+			return ExecResult{}, time.Since(start), err
+		}
+		result, err := stmt.ExecContext(ctx, params...)
 		if err != nil {
 			return ExecResult{}, time.Since(start), err
 		}

@@ -11,6 +11,11 @@ const coreMode = GetConvar('spacedb_core_mode', 'restart'); // 'restart' | 'reus
 const resourceName = GetCurrentResourceName();
 const resourceRoot = GetResourcePath(resourceName);
 const subscriptions = new Set();
+const subscriptionCallbacks = new Map();
+// Buffers events that arrive between the subscribe response and the
+// callback being registered (Go fires the initial check immediately,
+// which can race the response trip back). Drained on callback set.
+const subscriptionBuffer = new Map();
 const pending = createPendingMap();
 const mirrorMax = Number(GetConvar('spacedb_mirror_max_entries', '10000')) || 10000;
 const mirror = createMirror({ maxEntries: mirrorMax });
@@ -121,11 +126,33 @@ function connectTransport() {
           console.log(`[spacedb] invalid tcp response: ${line}`);
           return;
         }
-        // Unsolicited events from the server (cache invalidations, etc.)
-        // arrive without an id. Route on the event field.
+        // Unsolicited events from the server (cache invalidations,
+        // realtime subscription updates) arrive without an id. Route on
+        // the event field.
         if (payload.event === 'invalidate') {
           if (payload.key) mirror.invalidate(payload.table, payload.key);
           else mirror.invalidateTable(payload.table);
+          return;
+        }
+        if (payload.event === 'subscription') {
+          const eventObj = {
+            id: payload.subId,
+            type: payload.type,
+            query: payload.query,
+            rows: payload.rows,
+            error: payload.error,
+            createdAt: payload.createdAt,
+          };
+          const cb = subscriptionCallbacks.get(payload.subId);
+          if (cb) {
+            try { cb(eventObj); }
+            catch (err) { console.log(`[spacedb] subscription callback threw: ${err.message}`); }
+          } else {
+            let buf = subscriptionBuffer.get(payload.subId);
+            if (!buf) { buf = []; subscriptionBuffer.set(payload.subId, buf); }
+            buf.push(eventObj);
+            if (buf.length > 64) buf.shift();
+          }
           return;
         }
         pending.markRecv(payload.id, recvNs);
@@ -342,24 +369,27 @@ function transaction(steps = []) {
 
 async function subscribe(sqlOrName, params = [], callback) {
   const result = await transport('subscribe', { query: sqlOrName, params });
-  if (result?.id) subscriptions.add(result.id);
-  if (callback && result?.id) {
-    const id = result.id;
-    const poll = async () => {
-      try {
-        const payload = await transport('events', { subId: id });
-        for (const event of payload?.events || []) callback(event);
-      } finally {
-        setTimeout(poll, 250);
+  if (result?.id) {
+    subscriptions.add(result.id);
+    if (typeof callback === 'function') {
+      subscriptionCallbacks.set(result.id, callback);
+      const buffered = subscriptionBuffer.get(result.id);
+      if (buffered) {
+        subscriptionBuffer.delete(result.id);
+        for (const ev of buffered) {
+          try { callback(ev); }
+          catch (err) { console.log(`[spacedb] subscription callback threw: ${err.message}`); }
+        }
       }
-    };
-    poll();
+    }
   }
   return result;
 }
 
 function unsubscribe(id) {
   subscriptions.delete(id);
+  subscriptionCallbacks.delete(id);
+  subscriptionBuffer.delete(id);
   return transport('unsubscribe', { subId: id });
 }
 
