@@ -112,3 +112,41 @@ func TestParseFormatsFloatKeyAsInt(t *testing.T) {
 		t.Fatalf("key = %q want 5", r.Entries[0].Key)
 	}
 }
+
+func TestParseUpdateBacktickedIdentifiers(t *testing.T) {
+	r := Parse("UPDATE `users` SET `name` = ? WHERE `id` = ?", []interface{}{"Jane", 5})
+	if len(r.Entries) != 1 || r.Entries[0].Table != "users" || r.Entries[0].Key != "5" {
+		t.Fatalf("got %+v want users/5", r)
+	}
+}
+
+func TestParseDeleteBacktickedTable(t *testing.T) {
+	r := Parse("DELETE FROM `users` WHERE id = ?", []interface{}{9})
+	if len(r.Entries) != 1 || r.Entries[0].Table != "users" || r.Entries[0].Key != "9" {
+		t.Fatalf("got %+v want users/9", r)
+	}
+}
+
+func TestParseReplaceIntoBackticked(t *testing.T) {
+	r := Parse("REPLACE INTO `users` (id, name) VALUES (?, ?)", []interface{}{5, "Jane"})
+	if r.FullTable != "users" {
+		t.Fatalf("expected FullTable=users; got %+v", r)
+	}
+}
+
+func TestParseUpdateDoubleQuotedPostgres(t *testing.T) {
+	r := Parse(`UPDATE "users" SET name = $1 WHERE id = $2`, []interface{}{"Jane", "abc"})
+	if len(r.Entries) != 1 || r.Entries[0].Table != "users" || r.Entries[0].Key != "abc" {
+		t.Fatalf("got %+v want users/abc", r)
+	}
+}
+
+func TestParseInsertOnDuplicateBackticked(t *testing.T) {
+	r := Parse(
+		"INSERT INTO `users` (`id`, `name`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
+		[]interface{}{5, "Jane"},
+	)
+	if r.FullTable != "users" {
+		t.Fatalf("expected FullTable=users; got %+v", r)
+	}
+}

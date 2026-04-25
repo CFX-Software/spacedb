@@ -31,8 +31,23 @@ type ParseResult struct {
 // regexes don't need (?i) and can stay simple.
 var spaceRe = regexp.MustCompile(`\s+`)
 
+// Strips backtick-quoted identifiers (MySQL/MariaDB) and ANSI double-quoted
+// identifiers (Postgres) so the downstream regexes can match unwrapped
+// table/column names. Only touches the wrapper characters around an
+// identifier-shaped token; string literals (single-quoted) aren't affected.
+var backtickIdentRe = regexp.MustCompile("`([a-zA-Z0-9_]+)`")
+var doubleQuoteIdentRe = regexp.MustCompile(`"([a-zA-Z0-9_]+)"`)
+
 func normalize(sql string) string {
-	return spaceRe.ReplaceAllString(strings.TrimSpace(strings.ToLower(sql)), " ")
+	s := strings.TrimSpace(sql)
+	s = backtickIdentRe.ReplaceAllString(s, "$1")
+	// Conservative on double-quotes: MySQL non-ANSI treats "x" as a string
+	// literal, but inside identifier positions (after UPDATE/DELETE/INSERT
+	// keywords) it's overwhelmingly Postgres-style quoting. Strip; if the
+	// SQL was actually a string-literal compare, FullTable fallback keeps
+	// us correct.
+	s = doubleQuoteIdentRe.ReplaceAllString(s, "$1")
+	return spaceRe.ReplaceAllString(strings.ToLower(s), " ")
 }
 
 // Match `update <table> set ... where <col> = <value>` where <value> is a
