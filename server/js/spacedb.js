@@ -1,7 +1,9 @@
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
 const { parseAddress, consumeFrames, createPendingMap, createMirror } = require('./server/js/protocol');
 const { ensureCore } = require('./server/js/lifecycle');
+const { parseConnString } = require('./server/js/connstring');
 
 const endpoint = GetConvar('spacedb_endpoint', 'http://127.0.0.1:37120');
 const transportEndpoint = GetConvar('spacedb_transport', '127.0.0.1:37121');
@@ -57,6 +59,48 @@ function watchChild(child) {
   });
 }
 
+// Auto-generates config.json from the FiveM convar `mysql_connection_string`
+// (the same convar oxmysql uses) so existing servers don't have to author a
+// config file. If config.json already exists it wins — explicit beats implicit.
+// Returns true when a config is ready to use, false when neither convar nor
+// file are present.
+function ensureConfig(configPath) {
+  if (fs.existsSync(configPath)) return true;
+  const raw = GetConvar('mysql_connection_string', '');
+  if (raw === '') {
+    console.log('[spacedb] no config.json and no `mysql_connection_string` convar set.');
+    console.log('[spacedb] add to server.cfg:  set mysql_connection_string "mysql://user:pass@host:port/db"');
+    return false;
+  }
+  const parsed = parseConnString(raw);
+  if (!parsed) {
+    console.log(`[spacedb] could not parse mysql_connection_string: ${raw}`);
+    return false;
+  }
+  const cfg = {
+    listen: '127.0.0.1:37120',
+    transport: { listen: '127.0.0.1:37121' },
+    database: {
+      driver: parsed.driver,
+      dsn: parsed.dsn,
+      maxOpenConns: 128,
+      maxIdleConns: 64,
+      connMaxLifetimeSeconds: 1800,
+      queryTimeoutMs: 5000,
+      slowQueryMs: 100,
+    },
+    realtime: { enabled: true, pollIntervalMs: 250 },
+  };
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+    console.log(`[spacedb] generated config.json from mysql_connection_string (driver=${parsed.driver})`);
+    return true;
+  } catch (err) {
+    console.log(`[spacedb] failed to write config.json: ${err.message}`);
+    return false;
+  }
+}
+
 function bootCore() {
   if (!manageCore) {
     coreDeferred.resolve({ skipped: true });
@@ -70,6 +114,11 @@ function bootCore() {
   const config = path.join(resourceRoot, 'config.json');
   const logPath = path.join(resourceRoot, 'spacedb-core.log');
   const transportAddr = parseAddress(transportEndpoint);
+
+  if (!ensureConfig(config)) {
+    coreDeferred.reject(new Error('spacedb has no config'));
+    return;
+  }
 
   ensureCore({
     endpoint,
