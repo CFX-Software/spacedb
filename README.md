@@ -15,11 +15,19 @@ If you have a server running oxmysql today and you swap to spacedb, here's what 
 
 ## Quick start
 
-Drop the resource folder into `resources/`, copy `config.example.json` to `config.json`, fill in your database details, and add this to `server.cfg`:
+Drop the resource folder into `resources/`. If you already run oxmysql or mysql-async, you almost certainly have this line in `server.cfg`:
+
+```cfg
+set mysql_connection_string "mysql://user:pass@127.0.0.1:3306/yourdb?charset=utf8mb4"
+```
+
+spacedb reads the same convar. No second config file needed. Just add:
 
 ```cfg
 ensure spacedb
 ```
+
+On first boot the resource writes a `config.json` next to the binary using your existing connection string. If you want to tune ports, pool size, or use Postgres, edit `config.json` after that first boot. The semicolon style oxmysql accepts (`server=...;userid=...;password=...;database=...`) also works.
 
 Then in any server script:
 
