@@ -59,45 +59,75 @@ function watchChild(child) {
   });
 }
 
-// Auto-generates config.json from the FiveM convar `mysql_connection_string`
-// (the same convar oxmysql uses) so existing servers don't have to author a
-// config file. If config.json already exists it wins — explicit beats implicit.
-// Returns true when a config is ready to use, false when neither convar nor
-// file are present.
+// Aligns config.json with the FiveM convar `mysql_connection_string` (the
+// same convar oxmysql uses). Behavior:
+//   1. No config.json + no convar  -> error, tell user to set the convar.
+//   2. No config.json + convar set -> generate a full config from convar.
+//   3. Config.json exists + no convar -> use file as-is.
+//   4. Config.json exists + convar set -> overwrite ONLY database.dsn and
+//      database.driver if they differ. Pool size, ports, realtime config,
+//      and any other tuning the user added are preserved.
 function ensureConfig(configPath) {
-  if (fs.existsSync(configPath)) return true;
   const raw = GetConvar('mysql_connection_string', '');
-  if (raw === '') {
+  const exists = fs.existsSync(configPath);
+
+  if (!exists && raw === '') {
     console.log('[spacedb] no config.json and no `mysql_connection_string` convar set.');
     console.log('[spacedb] add to server.cfg:  set mysql_connection_string "mysql://user:pass@host:port/db"');
     return false;
   }
+
+  if (!exists) {
+    const parsed = parseConnString(raw);
+    if (!parsed) {
+      console.log(`[spacedb] could not parse mysql_connection_string: ${raw}`);
+      return false;
+    }
+    const cfg = {
+      listen: '127.0.0.1:37120',
+      transport: { listen: '127.0.0.1:37121' },
+      database: {
+        driver: parsed.driver,
+        dsn: parsed.dsn,
+        maxOpenConns: 128,
+        maxIdleConns: 64,
+        connMaxLifetimeSeconds: 1800,
+        queryTimeoutMs: 5000,
+        slowQueryMs: 100,
+      },
+      realtime: { enabled: true, pollIntervalMs: 250 },
+    };
+    try {
+      fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+      console.log(`[spacedb] generated config.json from mysql_connection_string (driver=${parsed.driver})`);
+      return true;
+    } catch (err) {
+      console.log(`[spacedb] failed to write config.json: ${err.message}`);
+      return false;
+    }
+  }
+
+  if (raw === '') return true;
+
   const parsed = parseConnString(raw);
   if (!parsed) {
-    console.log(`[spacedb] could not parse mysql_connection_string: ${raw}`);
-    return false;
+    console.log(`[spacedb] could not parse mysql_connection_string, falling back to config.json: ${raw}`);
+    return true;
   }
-  const cfg = {
-    listen: '127.0.0.1:37120',
-    transport: { listen: '127.0.0.1:37121' },
-    database: {
-      driver: parsed.driver,
-      dsn: parsed.dsn,
-      maxOpenConns: 128,
-      maxIdleConns: 64,
-      connMaxLifetimeSeconds: 1800,
-      queryTimeoutMs: 5000,
-      slowQueryMs: 100,
-    },
-    realtime: { enabled: true, pollIntervalMs: 250 },
-  };
   try {
-    fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-    console.log(`[spacedb] generated config.json from mysql_connection_string (driver=${parsed.driver})`);
+    const current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    current.database = current.database || {};
+    if (current.database.dsn === parsed.dsn && current.database.driver === parsed.driver) {
+      return true;
+    }
+    current.database.dsn = parsed.dsn;
+    current.database.driver = parsed.driver;
+    fs.writeFileSync(configPath, JSON.stringify(current, null, 2));
+    console.log(`[spacedb] synced database.dsn/driver from mysql_connection_string (driver=${parsed.driver})`);
     return true;
   } catch (err) {
-    console.log(`[spacedb] failed to write config.json: ${err.message}`);
-    return false;
+    console.log(`[spacedb] config sync failed: ${err.message}; using existing config.json`);
+    return true;
   }
 }
 
