@@ -10,6 +10,24 @@ const transportEndpoint = GetConvar('spacedb_transport', '127.0.0.1:37121');
 const requestTimeoutMs = Number(GetConvar('spacedb_request_timeout_ms', '30000')) || 30000;
 const manageCore = GetConvar('spacedb_manage_core', 'true') === 'true';
 const coreMode = GetConvar('spacedb_core_mode', 'restart'); // 'restart' | 'reuse'
+
+// Level-gated logger. Defaults to `info` so production boots with one
+// "core ready" line plus warnings/errors only. Set `spacedb_log_level
+// debug` to see TCP connects, retries, and per-callback details.
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
+const logLevel = (GetConvar('spacedb_log_level', 'info') || 'info').toLowerCase();
+const logThreshold = LOG_LEVELS[logLevel] !== undefined ? LOG_LEVELS[logLevel] : LOG_LEVELS.info;
+function logAt(level, msg) {
+  if (LOG_LEVELS[level] > logThreshold) return;
+  const prefix = level === 'info' ? '' : level.toUpperCase() + ' ';
+  console.log(`[spacedb] ${prefix}${msg}`);
+}
+const log = {
+  error: (m) => logAt('error', m),
+  warn: (m) => logAt('warn', m),
+  info: (m) => logAt('info', m),
+  debug: (m) => logAt('debug', m),
+};
 const resourceName = GetCurrentResourceName();
 const resourceRoot = GetResourcePath(resourceName);
 const subscriptions = new Set();
@@ -47,7 +65,7 @@ function watchChild(child) {
   supervisedChild = child;
   child.once('exit', (code, signal) => {
     if (shuttingDown) return;
-    console.log(`[spacedb] WARN core exited unexpectedly code=${code} signal=${signal}; respawning`);
+    log.warn(`core exited unexpectedly code=${code} signal=${signal}; respawning`);
     pending.closeAll(new Error('spacedb core crashed; respawning'));
     if (socket && !socket.destroyed) socket.destroy();
     socket = null;
@@ -72,15 +90,15 @@ function ensureConfig(configPath) {
   const exists = fs.existsSync(configPath);
 
   if (!exists && raw === '') {
-    console.log('[spacedb] no config.json and no `mysql_connection_string` convar set.');
-    console.log('[spacedb] add to server.cfg:  set mysql_connection_string "mysql://user:pass@host:port/db"');
+    log.error('no config.json and no `mysql_connection_string` convar set');
+    log.error('add to server.cfg:  set mysql_connection_string "mysql://user:pass@host:port/db"');
     return false;
   }
 
   if (!exists) {
     const parsed = parseConnString(raw);
     if (!parsed) {
-      console.log(`[spacedb] could not parse mysql_connection_string: ${raw}`);
+      log.error(`could not parse mysql_connection_string: ${raw}`);
       return false;
     }
     const cfg = {
@@ -99,10 +117,10 @@ function ensureConfig(configPath) {
     };
     try {
       fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-      console.log(`[spacedb] generated config.json from mysql_connection_string (driver=${parsed.driver})`);
+      log.info(`generated config.json from mysql_connection_string (driver=${parsed.driver})`);
       return true;
     } catch (err) {
-      console.log(`[spacedb] failed to write config.json: ${err.message}`);
+      log.error(`failed to write config.json: ${err.message}`);
       return false;
     }
   }
@@ -111,7 +129,7 @@ function ensureConfig(configPath) {
 
   const parsed = parseConnString(raw);
   if (!parsed) {
-    console.log(`[spacedb] could not parse mysql_connection_string, falling back to config.json: ${raw}`);
+    log.warn(`could not parse mysql_connection_string, falling back to config.json: ${raw}`);
     return true;
   }
   try {
@@ -123,10 +141,10 @@ function ensureConfig(configPath) {
     current.database.dsn = parsed.dsn;
     current.database.driver = parsed.driver;
     fs.writeFileSync(configPath, JSON.stringify(current, null, 2));
-    console.log(`[spacedb] synced database.dsn/driver from mysql_connection_string (driver=${parsed.driver})`);
+    log.info(`synced database.dsn/driver from mysql_connection_string (driver=${parsed.driver})`);
     return true;
   } catch (err) {
-    console.log(`[spacedb] config sync failed: ${err.message}; using existing config.json`);
+    log.warn(`config sync failed: ${err.message}; using existing config.json`);
     return true;
   }
 }
@@ -159,24 +177,24 @@ function bootCore() {
     mode: coreMode,
   }).then((result) => {
     if (result.reused && result.killFailed) {
-      console.log(`[spacedb] could not kill stale core (different session?); reusing existing driver=${result.driver}`);
+      log.warn(`could not kill stale core; reusing existing driver=${result.driver}`);
     } else if (result.reused) {
-      console.log(`[spacedb] reusing existing core driver=${result.driver}`);
+      log.debug(`reusing existing core driver=${result.driver}`);
     } else {
-      console.log(`[spacedb] core ready driver=${result.driver} pid=${result.pid} endpoint=${endpoint}`);
+      log.info(`ready driver=${result.driver}`);
     }
     if (result.child) watchChild(result.child);
     respawnAttempt = 0;
     coreDeferred.resolve(result);
   }).catch((err) => {
-    console.log(`[spacedb] core boot failed: ${err.message}`);
+    log.error(`core boot failed: ${err.message}`);
     if (shuttingDown) {
       coreDeferred.reject(err);
       return;
     }
     const delay = Math.min(5000, 200 * 2 ** respawnAttempt);
     respawnAttempt += 1;
-    console.log(`[spacedb] retrying core boot in ${delay}ms (attempt ${respawnAttempt})`);
+    log.debug(`retrying core boot in ${delay}ms (attempt ${respawnAttempt})`);
     setTimeout(bootCore, delay);
   });
 }
@@ -192,7 +210,7 @@ function connectTransport() {
     const conn = net.createConnection(address, () => {
       socket = conn;
       connecting = null;
-      console.log(`[spacedb] tcp transport connected ${transportEndpoint}`);
+      log.debug(`tcp transport connected ${transportEndpoint}`);
       resolve(conn);
     });
 
@@ -202,7 +220,7 @@ function connectTransport() {
       const recvNs = Number(process.hrtime.bigint());
       buffer = consumeFrames(buffer, (payload, line) => {
         if (!payload) {
-          console.log(`[spacedb] invalid tcp response: ${line}`);
+          log.warn(`invalid tcp response: ${line}`);
           return;
         }
         // Unsolicited events from the server (cache invalidations,
@@ -225,7 +243,7 @@ function connectTransport() {
           const cb = subscriptionCallbacks.get(payload.subId);
           if (cb) {
             try { cb(eventObj); }
-            catch (err) { console.log(`[spacedb] subscription callback threw: ${err.message}`); }
+            catch (err) { log.warn(`subscription callback threw: ${err.message}`); }
           } else {
             let buf = subscriptionBuffer.get(payload.subId);
             if (!buf) { buf = []; subscriptionBuffer.set(payload.subId, buf); }
@@ -258,7 +276,7 @@ function connectTransport() {
 // Dead code: kept for emergency HTTP fallback. All JS exports use transport() (TCP).
 // If this fires, hot path leaked to HTTP — investigate.
 function request(method, path, body) {
-  console.log(`[spacedb] WARN unexpected HTTP fallback method=${method} path=${path}`);
+  log.warn(`unexpected HTTP fallback method=${method} path=${path}`);
   return new Promise((resolve, reject) => {
     PerformHttpRequest(`${endpoint}${path}`, (status, response) => {
       let decoded = null;
@@ -457,7 +475,7 @@ async function subscribe(sqlOrName, params = [], callback) {
         subscriptionBuffer.delete(result.id);
         for (const ev of buffered) {
           try { callback(ev); }
-          catch (err) { console.log(`[spacedb] subscription callback threw: ${err.message}`); }
+          catch (err) { log.warn(`subscription callback threw: ${err.message}`); }
         }
       }
     }

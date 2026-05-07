@@ -185,6 +185,8 @@ The cache parser understands `UPDATE`, `DELETE`, `INSERT`, `REPLACE INTO`, `ON D
 | `spacedb_core_mode` | `restart` | `restart` kills any existing core and starts fresh on boot. `reuse` keeps a healthy one running. |
 | `spacedb_request_timeout_ms` | `30000` | Per-request TCP timeout. |
 | `spacedb_mirror_max_entries` | `10000` | Max rows in the bridge cache (the fast tier). |
+| `spacedb_log_level` | `info` | One of `error`, `warn`, `info`, `debug`. Default emits one ready line plus warnings and errors. Set `debug` when troubleshooting. |
+| `mysql_connection_string` | (none) | Same convar oxmysql uses. When set, spacedb generates or syncs `config.json` automatically. |
 
 ## Performance
 
