@@ -517,6 +517,48 @@ exports('invalidate', invalidate);
 exports('invalidateTable', invalidateTable);
 exports('cacheStats', cacheStats);
 
+// `spacelog` console command: pulls /diagnostics, writes the bundle to
+// `spacedb-diag-<timestamp>.json` next to the resource, prints the path.
+// Users attach this file to a GitHub issue or DM. Server console only
+// (restricted=true means a player needs the `command.spacelog` ace).
+function fetchDiagnostics() {
+  return new Promise((resolve, reject) => {
+    const http = require('http');
+    const url = new URL('/diagnostics', endpoint);
+    const req = http.request(
+      { hostname: url.hostname, port: url.port, path: url.pathname, method: 'GET', timeout: 5000 },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          resolve(body);
+        });
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
+  });
+}
+
+RegisterCommand('spacelog', async (source) => {
+  try {
+    const body = await fetchDiagnostics();
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '');
+    const file = path.join(resourceRoot, `spacedb-diag-${ts}.json`);
+    fs.writeFileSync(file, body);
+    log.info(`diagnostics written: ${file}`);
+    log.info('attach this file to a GitHub issue or DM (passwords are redacted)');
+  } catch (err) {
+    log.error(`spacelog failed: ${err.message}`);
+  }
+}, true);
+
 on('onResourceStop', (stopped) => {
   if (stopped !== GetCurrentResourceName()) return;
   shuttingDown = true;

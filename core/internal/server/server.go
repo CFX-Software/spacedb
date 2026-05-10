@@ -22,13 +22,15 @@ import (
 var validIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Server struct {
-	cfg     config.Config
-	store   *db.Store
-	hub     *realtime.Hub
-	cache   *cache.Cache
-	http    *http.Server
-	tcp     net.Listener
-	metrics *metricsByOp
+	cfg       config.Config
+	store     *db.Store
+	hub       *realtime.Hub
+	cache     *cache.Cache
+	http      *http.Server
+	tcp       net.Listener
+	metrics   *metricsByOp
+	errors    *errorLog
+	startedAt time.Time
 
 	subsMu sync.RWMutex
 	subs   map[*transportSub]struct{}
@@ -44,10 +46,12 @@ func New(cfg config.Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:     cfg,
-		store:   store,
-		subs:    make(map[*transportSub]struct{}),
-		metrics: newMetricsByOp(),
+		cfg:       cfg,
+		store:     store,
+		subs:      make(map[*transportSub]struct{}),
+		metrics:   newMetricsByOp(),
+		errors:    newErrorLog(100),
+		startedAt: time.Now(),
 	}
 	s.hub = realtime.New(store, cfg.PollInterval(), cfg.QueryTimeout())
 	s.cache = cache.New(cache.Options{MaxEntries: 100_000})
@@ -100,6 +104,7 @@ func (s *Server) transportConnCount() int {
 func (s *Server) logQuery(kind, query string, dur time.Duration, err error) {
 	if err != nil {
 		slog.Warn("query failed", "kind", kind, "durationMs", dur.Milliseconds(), "error", err)
+		s.errors.record(kind, query, err.Error(), dur)
 		return
 	}
 	if dur >= s.cfg.SlowQueryThreshold() {
