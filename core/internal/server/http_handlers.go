@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/inkwell/spacedb/core/internal/db"
 )
@@ -42,6 +43,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/events", s.events)
 	mux.HandleFunc("/v1/stats", s.stats)
 	mux.HandleFunc("/metrics", s.metricsEndpoint)
+	mux.HandleFunc("/diagnostics", s.diagnosticsEndpoint)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +173,36 @@ func (s *Server) metricsEndpoint(w http.ResponseWriter, r *http.Request) {
 			"connections": s.transportConnCount(),
 		},
 		"ops": s.metrics.snapshot(),
+	})
+}
+
+// diagnosticsEndpoint returns everything useful for a bug report in one
+// JSON blob: version, redacted config, recent SQL errors, full metrics,
+// pool stats, cache stats, uptime. The Lua `spacelog` command writes
+// this to a file for the user to attach to a GitHub issue or DM.
+func (s *Server) diagnosticsEndpoint(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"version":     Version,
+		"driver":      s.cfg.Database.Driver,
+		"dsnRedacted": redactDSN(s.cfg.Database.DSN),
+		"uptimeMs":    time.Since(s.startedAt).Milliseconds(),
+		"config": map[string]interface{}{
+			"listen":         s.cfg.Listen,
+			"transport":      s.cfg.Transport.Listen,
+			"maxOpenConns":   s.cfg.Database.MaxOpenConns,
+			"maxIdleConns":   s.cfg.Database.MaxIdleConns,
+			"queryTimeoutMs": s.cfg.Database.QueryTimeoutMs,
+			"slowQueryMs":    s.cfg.Database.SlowQueryMs,
+			"realtime":       s.cfg.Realtime,
+		},
+		"db":            s.store.Stats(),
+		"cache":         s.cache.Stats(),
+		"subscriptions": s.hub.Count(),
+		"transport": map[string]interface{}{
+			"connections": s.transportConnCount(),
+		},
+		"ops":          s.metrics.snapshot(),
+		"recentErrors": s.errors.snapshot(),
 	})
 }
 
