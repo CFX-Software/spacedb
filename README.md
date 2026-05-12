@@ -165,6 +165,16 @@ local info = exports.spacedb:stats()
 
 You can also hit `http://127.0.0.1:37120/metrics` from a browser or curl. It returns a full snapshot: how many of each operation ran, average and p99 timings, cache hit rate, active TCP connections, MySQL pool usage.
 
+### Diagnostic bundle for bug reports
+
+If something goes wrong and you want to file an issue, run this in the server console:
+
+```
+spacelog
+```
+
+That writes a `spacedb-diag-<timestamp>.json` file next to the resource. The bundle includes the spacedb version, redacted DSN (password masked out), uptime, pool stats, cache stats, per-op timings, and the last 100 SQL errors with their queries and timestamps. Attach that file to your GitHub issue or DM. No credentials leak in the redacted form.
+
 ## How the cache works
 
 Reads through `getById` and `getMany` are cached in two places: in the Node bridge (about 5 to 50 microseconds per hit) and in the Go core (about 50 microseconds per hit). On a cold cache, both miss and the request goes to MySQL. On a warm cache, you skip everything.
