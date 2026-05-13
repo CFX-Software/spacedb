@@ -1,13 +1,22 @@
 fx_version 'cerulean'
-game 'gta5'
+game 'common'
+lua54 'yes'
 
+name 'oxmysql'
 author 'Inkwell'
-description 'spacedb OxMySQL compatibility adapter'
-version '0.1.0'
+version '0.2.0'
+description 'spacedb oxmysql / mysql-async / ghmattimysql compatibility shim'
 
 dependency 'spacedb'
 
+provide 'mysql-async'
+provide 'ghmattimysql'
+
 server_script 'server.lua'
+
+files {
+    'lib/MySQL.lua',
+}
 
 server_exports {
     'query',
