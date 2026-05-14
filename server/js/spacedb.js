@@ -273,39 +273,6 @@ function connectTransport() {
   return connecting;
 }
 
-// Dead code: kept for emergency HTTP fallback. All JS exports use transport() (TCP).
-// If this fires, hot path leaked to HTTP — investigate.
-function request(method, path, body) {
-  log.warn(`unexpected HTTP fallback method=${method} path=${path}`);
-  return new Promise((resolve, reject) => {
-    PerformHttpRequest(`${endpoint}${path}`, (status, response) => {
-      let decoded = null;
-      if (response) {
-        try {
-          decoded = JSON.parse(response);
-        } catch (err) {
-          reject(new Error(`invalid JSON response: ${err.message}`));
-          return;
-        }
-      }
-
-      if (status < 200 || status >= 300) {
-        reject(new Error(decoded?.error || `HTTP ${status}`));
-        return;
-      }
-
-      if (decoded?.error) {
-        reject(new Error(decoded.error));
-        return;
-      }
-
-      resolve(decoded);
-    }, method, body ? JSON.stringify(body) : '', {
-      'Content-Type': 'application/json',
-    });
-  });
-}
-
 async function transport(op, payload, opts = {}) {
   await coreReady();
   const conn = await connectTransport();
