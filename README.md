@@ -1,5 +1,9 @@
 # spacedb
 
+[![CI](https://github.com/CFX-Software/spacedb/actions/workflows/ci.yml/badge.svg)](https://github.com/CFX-Software/spacedb/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/CFX-Software/spacedb?include_prereleases&sort=semver)](https://github.com/CFX-Software/spacedb/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A faster database resource for FiveM. It does what oxmysql does (queries, inserts, transactions, prepared statements) but adds an in-process row cache and live query subscriptions that fire when data changes. There are also compatibility resources so you can swap it in without rewriting your other scripts.
 
 Under the hood there's a small Go program that talks to MySQL or Postgres. Your Lua scripts call exports the way they would with any other database resource, and the Go program does the heavy lifting. The Go program is started, watched, and restarted automatically by the spacedb resource when your server boots, so you don't have to set it up as a separate service.
@@ -280,6 +284,12 @@ The Go core is where caching, prepared statements, subscriptions, and metrics ac
 
 `config.json` and `bin` are gitignored. Database passwords, generated binaries, and machine-specific stuff stays out of source control.
 
-## Credits
+## Contributing
 
-Big shout out to Claude Code and Codex for finding and fixing some catastrophic bugs in this codebase along the way. A few of them would have shipped to production without that second pair of eyes, including a write race in the realtime push path, a stale binary path that masked an unrelated fix for a full session, and a parser case that would have over-invalidated cache on every backticked identifier. Pair-programming with an LLM works when you check the work, and this project is better for it.
+Issues and PRs welcome. If you're filing a bug, please include the output of `spacelog` (see above) — it has everything needed to reproduce without leaking credentials.
+
+For larger changes, open an issue first so we can talk about the shape before you spend time on a PR.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
