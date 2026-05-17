@@ -14,7 +14,7 @@ Only the latest minor release line is supported. Right now that's the `0.9.x` se
 
 Please **do not** open a public issue for security problems.
 
-Email `security@inkwell.studio` with:
+Email `tyrese@yeema.co` or reach out on Discord at https://discord.gg/inkwell. Include:
 
 - A short description of the issue
 - Steps to reproduce (or a minimal repro repo)
