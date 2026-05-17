@@ -7,11 +7,13 @@
 
 local spacedb = exports.spacedb
 
--- Translates oxmysql named parameter SQL ({:name} or {@name}) into
--- positional `?` and reorders the params table to match. mysql-async
--- historically used `@name`, oxmysql accepts both, and QBCore uses
--- `:name` in INSERT/UPDATE statements. Skip translation when params is
--- already an array.
+-- Translates oxmysql named parameter SQL (:name or @name) into positional
+-- `?` and reorders the params table to match. mysql-async historically used
+-- `@name`, oxmysql accepts both, QBCore uses `:name`, and ESX stores the
+-- sigil inside the key (`{ ['@type'] = 'boat' }`) instead of stripping it
+-- (`{ type = 'boat' }`). Look up under all three shapes so the same shim
+-- handles every caller style. Skip translation when params is an array.
+-- Falls back to NDB.NULL for genuinely missing keys (matches oxmysql).
 local function translateNamed(sql, params)
     if type(params) ~= 'table' then return sql, params or {} end
     local named = false
@@ -22,8 +24,12 @@ local function translateNamed(sql, params)
     local positional = {}
     -- First char must be letter/underscore so `'12:00:00'` literals and
     -- `::` casts aren't mis-parsed as named bind tokens.
-    local newSql = sql:gsub('[@:]([%a_][%w_]*)', function(name)
-        positional[#positional + 1] = params[name]
+    local newSql = sql:gsub('([@:])([%a_][%w_]*)', function(sigil, name)
+        local v = params[name]
+        if v == nil then v = params[sigil .. name] end
+        if v == nil then v = params['@' .. name] end
+        if v == nil then v = params[':' .. name] end
+        positional[#positional + 1] = v
         return '?'
     end)
     return newSql, positional
@@ -44,8 +50,50 @@ local function isBatchedParams(params)
     return true
 end
 
+-- Expands array values in positional params into multiple `?` placeholders.
+-- ESX writes `WHERE col IN (?)` and binds `{ {"a","b","c"} }`; real oxmysql
+-- inlines the array, the Go MySQL driver does not. Walks the SQL once,
+-- substituting each `?` whose bound value is a table with `?,?,?...`.
+local function expandArrayParams(sql, params)
+    if type(params) ~= 'table' or #params == 0 then return sql, params end
+    local hasArray = false
+    for i = 1, #params do
+        if type(params[i]) == 'table' then hasArray = true; break end
+    end
+    if not hasArray then return sql, params end
+    local out, flat = {}, {}
+    local pIdx = 1
+    for i = 1, #sql do
+        local c = sql:sub(i, i)
+        if c == '?' then
+            local v = params[pIdx]
+            pIdx = pIdx + 1
+            if type(v) == 'table' then
+                local n = #v
+                if n == 0 then
+                    out[#out + 1] = 'NULL'
+                else
+                    local placeholders = {}
+                    for j = 1, n do
+                        placeholders[j] = '?'
+                        flat[#flat + 1] = v[j]
+                    end
+                    out[#out + 1] = table.concat(placeholders, ',')
+                end
+            else
+                out[#out + 1] = '?'
+                flat[#flat + 1] = v
+            end
+        else
+            out[#out + 1] = c
+        end
+    end
+    return table.concat(out), flat
+end
+
 local function runSync(method, query, params)
     query, params = translateNamed(query, params or {})
+    query, params = expandArrayParams(query, params)
     if method == 'query' or method == 'fetchAll' then
         return spacedb:query(query, params) or {}
     elseif method == 'single' or method == 'fetchSingle' then
