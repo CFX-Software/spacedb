@@ -40,10 +40,14 @@ local function sqlVerb(query)
     return (query or ''):match('^%s*([%a]+)'):upper()
 end
 
--- True when params is a table of tables, e.g. {{1, 'a'}, {2, 'b'}} — used
+-- True when params is a table of >=2 tables, e.g. {{1,'a'},{2,'b'}} — used
 -- by oxmysql's batched prepare to run the same SQL with N param sets.
+-- Single-element outer tables ({{...}}) are ambiguous: they could be a
+-- one-row batch, or one positional param whose value is an array used
+-- for IN-list expansion. ESX multichar uses the IN form so we prefer it
+-- and route single-element shapes through expandArrayParams.
 local function isBatchedParams(params)
-    if type(params) ~= 'table' or #params == 0 then return false end
+    if type(params) ~= 'table' or #params < 2 then return false end
     for i = 1, #params do
         if type(params[i]) ~= 'table' then return false end
     end
