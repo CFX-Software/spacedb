@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.1
+
+OxMySQL compatibility hardening from real-world QBCore and ESX Legacy drop-in tests.
+
+### Shim parameter handling
+- Named parameter lookup now tries the stripped name, the sigil-prefixed key, and explicit `@name` / `:name` shapes. QBCore uses `{ name = value }`, ESX uses `{ ['@name'] = value }`, both work.
+- Array-valued positional params expand inline into multiple `?` placeholders for `WHERE col IN (?)` patterns. ESX multichar relies on this.
+- Empty arrays render as `NULL` instead of producing `IN ()` syntax errors.
+- Batched param sets require at least two rows to be treated as `executeMany`. Single-element outer shapes (`{{a,b}}`) fall through to array expansion so single-row IN-list calls aren't mistaken for batched inserts.
+
+### Shim result shapes
+- `MySQL.prepare.await` smart-unwraps: single-row single-column returns the scalar value, single-row multi-column returns the row, multi-row returns the rows array, zero rows returns nil. QBCore's `CreateCitizenId` uniqueness loop and player loader rely on this.
+- `MySQL.prepare` routes by SQL verb: INSERT/REPLACE return lastInsertId, UPDATE/DELETE return rowsAffected.
+- `MySQL.query` with non-SELECT verbs (ALTER, CREATE, INSERT, UPDATE, DELETE) routes through execute and returns `{ affectedRows, insertId }` instead of an empty rows array. `esx_property`'s `result?.affectedRows` check on ALTER TABLE works.
+
+### Distribution
+- Shim ships `lib/MySQL.lua` so consumer scripts importing `@oxmysql/lib/MySQL.lua` via shared_script get a working `MySQL` global without changes.
+- fxmanifest declares `provide 'mysql-async'` and `provide 'ghmattimysql'`, `lua54 'yes'`, `game 'common'` to match real oxmysql.
+
+### Tested
+- QBCore (qb-core 1.x + qb-multicharacter, qb-banking, qb-houses, qb-inventory, qb-policejob, qb-vehiclekeys and friends) up through resource boot and player connect.
+- ESX Legacy 1.13.5 (es_extended, esx_multicharacter, esx_identity, esx_skin, esx_property, esx_datastore, esx_addoninventory, esx_addonaccount, esx_boat) up through ESX initialization.
+- Test DB: MariaDB 11.8.6 on Docker. End-user FiveM boxes ship MariaDB by default, so this matches real deployment.
+
 ## 0.2.0
 
 ### Performance
