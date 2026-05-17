@@ -54,8 +54,12 @@ end
 -- ESX writes `WHERE col IN (?)` and binds `{ {"a","b","c"} }`; real oxmysql
 -- inlines the array, the Go MySQL driver does not. Walks the SQL once,
 -- substituting each `?` whose bound value is a table with `?,?,?...`.
+-- Batched param sets ({{...},{...}}) are NOT expanded here — they get
+-- routed to executeMany by the caller and would otherwise be mistaken
+-- for IN-list arrays.
 local function expandArrayParams(sql, params)
     if type(params) ~= 'table' or #params == 0 then return sql, params end
+    if isBatchedParams(params) then return sql, params end
     local hasArray = false
     for i = 1, #params do
         if type(params[i]) == 'table' then hasArray = true; break end
@@ -95,6 +99,16 @@ local function runSync(method, query, params)
     query, params = translateNamed(query, params or {})
     query, params = expandArrayParams(query, params)
     if method == 'query' or method == 'fetchAll' then
+        -- oxmysql.query accepts any statement, returning a result object
+        -- for DDL/DML callers (esx_property checks `result?.affectedRows`).
+        -- Route non-SELECT statements through execute so we can return
+        -- a shape with affectedRows + insertId. Empty SELECT returns {}.
+        local verb = sqlVerb(query)
+        if verb ~= 'SELECT' and verb ~= 'SHOW' and verb ~= 'EXPLAIN'
+           and verb ~= 'DESCRIBE' and verb ~= 'DESC' and verb ~= 'WITH' then
+            local r = spacedb:execute(query, params or {})
+            return { affectedRows = r and r.rowsAffected or 0, insertId = r and r.lastInsertId or 0 }
+        end
         return spacedb:query(query, params) or {}
     elseif method == 'single' or method == 'fetchSingle' then
         return spacedb:single(query, params)
