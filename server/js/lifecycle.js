@@ -88,7 +88,15 @@ async function killByPort(port) {
     });
   }
   return new Promise((resolve) => {
-    const tk = spawn('sh', ['-c', `fuser -k ${port}/tcp 2>/dev/null || lsof -ti tcp:${port} | xargs -r kill -9`]);
+    // Discover PIDs first so we can return false when nothing was listening
+    // (rather than always returning true because xargs -r exits 0 on empty
+    // input). Fall back to fuser when lsof isn't available.
+    const script =
+      `pids=$(lsof -ti tcp:${port} 2>/dev/null); ` +
+      `if [ -z "$pids" ]; then pids=$(fuser ${port}/tcp 2>/dev/null); fi; ` +
+      `if [ -z "$pids" ]; then exit 1; fi; ` +
+      `echo $pids | xargs -r kill -9 2>/dev/null`;
+    const tk = spawn('sh', ['-c', script]);
     tk.on('close', (code) => resolve(code === 0));
     tk.on('error', () => resolve(false));
   });
