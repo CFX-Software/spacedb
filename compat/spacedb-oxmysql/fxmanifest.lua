@@ -4,7 +4,7 @@ lua54 'yes'
 
 name 'oxmysql'
 author 'Inkwell'
-version '0.2.0'
+version '0.2.1'
 description 'spacedb oxmysql / mysql-async / ghmattimysql compatibility shim'
 
 dependency 'spacedb'
@@ -19,22 +19,17 @@ files {
 }
 
 server_exports {
-    'query',
-    'single',
-    'scalar',
-    'execute',
-    'insert',
-    'update',
-    'prepare',
-    'transaction',
-    'rawExecute',
-    'query_async',
-    'single_async',
-    'scalar_async',
-    'execute_async',
-    'insert_async',
-    'update_async',
-    'prepare_async',
-    'transaction_async',
-    'rawExecute_async'
+    'query',          'query_async',          'querySync',
+    'single',         'single_async',         'singleSync',
+    'scalar',         'scalar_async',         'scalarSync',
+    'execute',        'execute_async',        'executeSync',
+    'insert',         'insert_async',         'insertSync',
+    'update',         'update_async',         'updateSync',
+    'prepare',        'prepare_async',        'prepareSync',
+    'transaction',    'transaction_async',    'transactionSync',
+    'rawExecute',     'rawExecute_async',     'rawExecuteSync',
+    'fetch',          'fetch_async',          'fetchSync',
+    'store',          'store_async',          'storeSync',
+    'isReady',        'isReady_async',        'isReadySync',
+    'awaitConnection','awaitConnection_async','awaitConnectionSync',
 }

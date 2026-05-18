@@ -118,26 +118,49 @@ local function rawExecute(sql, rows, cb)
     return callbackOrReturn(result, cb)
 end
 
-exports('query', query)
-exports('single', single)
-exports('scalar', scalar)
-exports('execute', execute)
-exports('insert', insert)
-exports('update', update)
-exports('prepare', prepare)
-exports('transaction', transaction)
-exports('rawExecute', rawExecute)
+-- Deprecated aliases real oxmysql still ships:
+-- MySQL.fetch == MySQL.query, MySQL.store returns the SQL unchanged.
+local function fetch(sql, params, cb)
+    return query(sql, params, cb)
+end
 
--- _async aliases: OxMySQL exposes promise variants under <fn>_async.
--- spacedb exports already return synchronously (the JS bridge yields the
--- caller via FiveM scheduler), so callers awaiting the promise on the JS
--- side get the same value. Lua callers receive the value directly.
-exports('query_async', query)
-exports('single_async', single)
-exports('scalar_async', scalar)
-exports('execute_async', execute)
-exports('insert_async', insert)
-exports('update_async', update)
-exports('prepare_async', prepare)
-exports('transaction_async', transaction)
-exports('rawExecute_async', rawExecute)
+local function store(sql, cb)
+    return callbackOrReturn(sql, cb)
+end
+
+local function isReady()
+    return true
+end
+
+local function awaitConnection()
+    return true
+end
+
+-- Real oxmysql registers every method under THREE export names:
+--   <key>            sync-style (callback or return)
+--   <key>_async      promise/async variant (modern code)
+--   <key>Sync        deprecated alias of _async (older code still uses it)
+-- Scripts written before the _async rename (and a lot of QBCore/ESX
+-- modules) call fetchSync/executeSync/insertSync/etc. Missing any one
+-- of these throws "No such export <name> in resource oxmysql".
+local methods = {
+    query = query,
+    single = single,
+    scalar = scalar,
+    execute = execute,
+    insert = insert,
+    update = update,
+    prepare = prepare,
+    transaction = transaction,
+    rawExecute = rawExecute,
+    fetch = fetch,
+    store = store,
+    isReady = isReady,
+    awaitConnection = awaitConnection,
+}
+
+for name, fn in pairs(methods) do
+    exports(name, fn)
+    exports(name .. '_async', fn)
+    exports(name .. 'Sync', fn)
+end

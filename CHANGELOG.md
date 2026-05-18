@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+OxMySQL shim export-surface parity with real oxmysql.
+
+### spacedb-oxmysql
+- Adds the `Sync` suffix variant for every method. Real oxmysql registers every method three times (`<m>`, `<m>_async`, `<m>Sync`); the shim previously only registered the first two. Older scripts (and a chunk of QBCore/ESX modules) call `exports.oxmysql:fetchSync` / `executeSync` / `insertSync` / `updateSync` / etc, which threw `No such export fetchSync in resource oxmysql` after the spacedb swap.
+- Adds the deprecated aliases real oxmysql still ships: `fetch` (alias of `query`), `store` (returns the SQL unchanged), `isReady`, `awaitConnection`. Each now exists under all three name forms.
+- Bumps spacedb-oxmysql to 0.2.1.
+
 ## 0.2.2
 
 FiveM sandbox compatibility fixes for `c-scripting-node` permission errors.
