@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.4
+
+OxMySQL shim parity with real oxmysql on the resource-exports path.
+
+### spacedb-oxmysql
+- `exports.oxmysql:query` / `:execute` / `:fetch` now route by SQL verb and return the real oxmysql shape: array of rows for SELECT/SHOW/EXPLAIN/DESC/WITH, `{affectedRows, insertId, rowsAffected, lastInsertId}` for INSERT/UPDATE/DELETE/DDL. The previous shim returned a bare number for `:execute`, which crashed JS callers (e.g. nteam-nitro) doing `result.affectedRows` with `attempt to index a number value`.
+- Resource-exports path now applies the same SQL preprocessing the `MySQL.*` shared-script path already did: named placeholder translation (`:name` / `@name` / `{['@name']=v}` / `{name=v}`), `IN (?)` array expansion, empty-array → `IN (NULL)`.
+- Missing positional placeholders now substitute literal `NULL` instead of erroring. Fixes `sql: expected 1 arguments, got 0` on `DELETE FROM vehicle_parking WHERE id IN (?)` when callers (AdvancedParking) pass an empty list.
+- `prepare` resource-export now smart-unwraps based on SQL verb the same way `MySQL.prepare` does (INSERT/REPLACE → insertId, UPDATE/DELETE → rowsAffected, SELECT → row/scalar/array depending on shape).
+- `transaction` + `rawExecute` resource-exports also run the preprocessing pipeline.
+- Mirrors the empty-placeholder → NULL fix into `lib/MySQL.lua` so `MySQL.*` callers benefit too.
+- Bump spacedb-oxmysql to 0.2.2.
+
+### Verified against
+- qb-core, qbx_core, esx_core (es_extended + esx_identity + esx_multicharacter + esx_skin) — no `exports.oxmysql` direct callers in any of them; all `MySQL.*` callers still behave as before. ESX identity's `IN (?)` patterns continue to expand correctly.
+
 ## 0.2.3
 
 OxMySQL shim export-surface parity with real oxmysql.

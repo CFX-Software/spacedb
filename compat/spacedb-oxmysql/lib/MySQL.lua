@@ -62,13 +62,17 @@ end
 -- routed to executeMany by the caller and would otherwise be mistaken
 -- for IN-list arrays.
 local function expandArrayParams(sql, params)
-    if type(params) ~= 'table' or #params == 0 then return sql, params end
+    if type(params) ~= 'table' then return sql, params end
     if isBatchedParams(params) then return sql, params end
     local hasArray = false
-    for i = 1, #params do
+    local nParams = #params
+    for i = 1, nParams do
         if type(params[i]) == 'table' then hasArray = true; break end
     end
-    if not hasArray then return sql, params end
+    local _, placeholderCount = sql:gsub('%?', '')
+    if not hasArray and placeholderCount <= nParams then
+        return sql, params
+    end
     local out, flat = {}, {}
     local pIdx = 1
     for i = 1, #sql do
@@ -76,7 +80,9 @@ local function expandArrayParams(sql, params)
         if c == '?' then
             local v = params[pIdx]
             pIdx = pIdx + 1
-            if type(v) == 'table' then
+            if v == nil then
+                out[#out + 1] = 'NULL'
+            elseif type(v) == 'table' then
                 local n = #v
                 if n == 0 then
                     out[#out + 1] = 'NULL'
