@@ -1,6 +1,4 @@
 # spacedb
-
-[![CI](https://github.com/CFX-Software/spacedb/actions/workflows/ci.yml/badge.svg)](https://github.com/CFX-Software/spacedb/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CFX-Software/spacedb?include_prereleases&sort=semver)](https://github.com/CFX-Software/spacedb/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
