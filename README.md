@@ -280,6 +280,16 @@ MySQL or Postgres
 
 The Go core is where caching, prepared statements, subscriptions, and metrics actually live. The Node bridge is mostly supervision, the small fast-tier cache, and the FiveM interop. Lua code just sees normal exports.
 
+## Examples
+
+Real resources built on spacedb. Use these as references when wiring your own server around it.
+
+| Resource | Description | Repo |
+|:---------|:------------|:-----|
+| [space_base](https://github.com/CFX-Software/space_base) | Minimal typesafe FiveM character framework concept. Vue 3 + Pinia + Tailwind NUI on top of spacedb. Character create/select, spawn picker, cash and bank system, realtime HUD sync via `subscribe`. Built to be extended into a full framework. | [CFX-Software/space_base](https://github.com/CFX-Software/space_base) |
+
+Want your project listed here? Open a PR adding a row.
+
 ## Notes
 
 `config.json` and `bin` are gitignored. Database passwords, generated binaries, and machine-specific stuff stays out of source control.
