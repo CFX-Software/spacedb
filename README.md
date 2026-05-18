@@ -26,8 +26,11 @@ set mysql_connection_string "mysql://user:pass@127.0.0.1:3306/yourdb?charset=utf
 spacedb reads the same convar. No second config file needed. Just add:
 
 ```cfg
+add_unsafe_child_process_permission spacedb
 ensure spacedb
 ```
+
+The `add_unsafe_child_process_permission` line is required: spacedb's Go core runs as a child process and FiveM's Node sandbox refuses to spawn child processes unless the server operator opts in. The grant is per-resource and must appear **before** the `ensure`/`start` line (FiveM locks permissions once the first resource starts). It cannot be granted from `fxmanifest.lua` — only `server.cfg`.
 
 On first boot the resource writes a `config.json` next to the binary using your existing connection string. If you want to tune ports, pool size, or use Postgres, edit `config.json` after that first boot. The semicolon style oxmysql accepts (`server=...;userid=...;password=...;database=...`) also works.
 

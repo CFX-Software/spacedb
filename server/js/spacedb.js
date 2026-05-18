@@ -188,6 +188,18 @@ function bootCore() {
     coreDeferred.resolve(result);
   }).catch((err) => {
     log.error(`core boot failed: ${err.message}`);
+    // FiveM's Node sandbox denies child_process.spawn unless the server
+    // operator opts in via server.cfg. The grant is global to the resource,
+    // so the resource itself cannot enable it from fxmanifest.lua. Emit a
+    // clear setup hint instead of leaving the user to decode Node's error.
+    const msg = String(err && err.message || '');
+    if (err && (err.code === 'ERR_ACCESS_DENIED' || /allow-child-process|Access to this API has been restricted/i.test(msg))) {
+      log.error('spacedb core is spawned as a child process. Add this to your server.cfg BEFORE every `start` line:');
+      log.error('    add_unsafe_child_process_permission spacedb');
+      log.error('(this MUST be set before resources start; it cannot be granted from fxmanifest.lua)');
+      coreDeferred.reject(err);
+      return;
+    }
     if (shuttingDown) {
       coreDeferred.reject(err);
       return;

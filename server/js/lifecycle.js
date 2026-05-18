@@ -108,7 +108,13 @@ function spawnCore({ binary, config, logPath }) {
   const stdio = ['ignore', 'ignore', 'ignore'];
   if (logPath) {
     try {
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      const dir = path.dirname(logPath);
+      // Skip mkdir when the directory already exists. FiveM's Node permission
+      // layer (FilesystemPermissions.cpp) rejects writes whose path resolves
+      // to the resource-root directory with an empty remainder, so an
+      // unconditional mkdir on `<resource>/` would emit a confusing
+      // "write not allowed" trace even though the dir is right there.
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const fd = fs.openSync(logPath, 'a');
       stdio[1] = fd;
       stdio[2] = fd;

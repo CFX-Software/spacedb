@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+FiveM sandbox compatibility fixes for `c-scripting-node` permission errors.
+
+### Boot
+- Detect Node permission denial during `child_process.spawn` of the Go core and emit explicit setup instructions pointing at `add_unsafe_child_process_permission spacedb` in `server.cfg`. Previously surfaced as a raw "Access to this API has been restricted. Use --allow-child-process to manage permissions." trace with no hint that the grant must come from server.cfg (it cannot be granted from `fxmanifest.lua`).
+- `spawnCore` no longer calls `fs.mkdirSync` when the log directory already exists. FiveM's `FilesystemPermissions.cpp` rejects writes that resolve to the resource-root directory with an empty path remainder, which produced a misleading "Filesystem write permission check ... write not allowed" trace on every boot even though spacedb's own resource folder is auto-allowed.
+
+### Docs
+- README quick-start now lists `add_unsafe_child_process_permission spacedb` ahead of the `ensure` line and explains why it can't live in `fxmanifest.lua`.
+
 ## 0.2.1
 
 OxMySQL compatibility hardening from real-world QBCore and ESX Legacy drop-in tests.
