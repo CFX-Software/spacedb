@@ -32,6 +32,11 @@ const resourceName = GetCurrentResourceName();
 const resourceRoot = GetResourcePath(resourceName);
 const subscriptions = new Set();
 const subscriptionCallbacks = new Map();
+// id -> owning resource name. A subscription is owned by the resource that
+// called subscribe(); when that resource stops/restarts we must tear its
+// subs down or the Go core keeps polling them and fires events into a dead
+// funcref (issue #16).
+const subscriptionOwners = new Map();
 // Buffers events that arrive between the subscribe response and the
 // callback being registered (Go fires the initial check immediately,
 // which can race the response trip back). Drained on callback set.
@@ -444,9 +449,14 @@ function transaction(steps = []) {
 }
 
 async function subscribe(sqlOrName, params = [], callback) {
+  // Capture the owner BEFORE awaiting — GetInvokingResource() is only valid
+  // synchronously inside the export call, not after the transport await.
+  let owner = null;
+  try { owner = GetInvokingResource(); } catch (_e) { /* not in export ctx */ }
   const result = await transport('subscribe', { query: sqlOrName, params });
   if (result?.id) {
     subscriptions.add(result.id);
+    if (owner) subscriptionOwners.set(result.id, owner);
     if (typeof callback === 'function') {
       subscriptionCallbacks.set(result.id, callback);
       const buffered = subscriptionBuffer.get(result.id);
@@ -466,6 +476,7 @@ function unsubscribe(id) {
   subscriptions.delete(id);
   subscriptionCallbacks.delete(id);
   subscriptionBuffer.delete(id);
+  subscriptionOwners.delete(id);
   return transport('unsubscribe', { subId: id });
 }
 
@@ -539,13 +550,38 @@ RegisterCommand('spacelog', async (source) => {
 }, true);
 
 on('onResourceStop', (stopped) => {
-  if (stopped !== GetCurrentResourceName()) return;
-  shuttingDown = true;
-  for (const id of subscriptions) {
-    transport('unsubscribe', { subId: id }).catch(() => {});
+  if (stopped === GetCurrentResourceName()) {
+    // spacedb itself is stopping: tear everything down.
+    shuttingDown = true;
+    for (const id of subscriptions) {
+      transport('unsubscribe', { subId: id }).catch(() => {});
+    }
+    subscriptions.clear();
+    subscriptionCallbacks.clear();
+    subscriptionBuffer.clear();
+    subscriptionOwners.clear();
+    if (socket && !socket.destroyed) socket.destroy();
+    // Leave supervisedChild alone — it's detached and may be reused by a
+    // later resource boot in 'reuse' mode. 'restart' mode will kill it on
+    // the next boot's killByPort sweep.
+    return;
   }
-  if (socket && !socket.destroyed) socket.destroy();
-  // Leave supervisedChild alone — it's detached and may be reused by a
-  // later resource boot in 'reuse' mode. 'restart' mode will kill it on the
-  // next boot's killByPort sweep.
+
+  // A consumer resource stopped/restarted: unsubscribe everything it owned
+  // so the Go core stops polling those queries and stops firing events into
+  // its now-dead funcrefs (issue #16). Resources that re-subscribe on boot
+  // get fresh subscription ids.
+  let removed = 0;
+  for (const [id, owner] of subscriptionOwners) {
+    if (owner !== stopped) continue;
+    subscriptions.delete(id);
+    subscriptionCallbacks.delete(id);
+    subscriptionBuffer.delete(id);
+    subscriptionOwners.delete(id);
+    transport('unsubscribe', { subId: id }).catch(() => {});
+    removed += 1;
+  }
+  if (removed > 0) {
+    log.debug(`released ${removed} subscription(s) owned by stopped resource '${stopped}'`);
+  }
 });

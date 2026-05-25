@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.5
+
+Subscription leak on consumer resource restart (issue #16).
+
+### Realtime
+- `onResourceStop` now releases subscriptions owned by **any** stopped resource, not just spacedb itself. Previously the handler early-returned unless spacedb was the resource stopping, so when a consumer resource restarted its subscriptions stayed registered — the Go core kept polling those queries and firing change events into the consumer's now-dead funcref.
+- `subscribe` records the invoking resource (`GetInvokingResource()`, captured synchronously before the transport await) as the subscription owner.
+- On consumer stop, every subscription owned by that resource is dropped locally and `unsubscribe` is sent to the core. Resources that re-subscribe on boot receive fresh ids.
+- spacedb's own stop path now also clears the owner map alongside the existing teardown.
+
 ## 0.2.4
 
 OxMySQL shim parity with real oxmysql on the resource-exports path.
