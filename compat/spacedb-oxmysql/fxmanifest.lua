@@ -4,7 +4,7 @@ lua54 'yes'
 
 name 'oxmysql'
 author 'Inkwell'
-version '0.2.3'
+version '0.2.4'
 description 'spacedb oxmysql / mysql-async / ghmattimysql compatibility shim'
 
 dependency 'spacedb'
@@ -32,4 +32,5 @@ server_exports {
     'store',          'store_async',          'storeSync',
     'isReady',        'isReady_async',        'isReadySync',
     'awaitConnection','awaitConnection_async','awaitConnectionSync',
+    'startTransaction',
 }

@@ -93,7 +93,23 @@ local function expandArrayParams(sql, params)
                 local n = #v
                 if n == 0 then
                     out[#out + 1] = 'NULL'
+                elseif type(v[1]) == 'table' then
+                    -- Array of arrays bound to one `?`: bulk row tuples.
+                    -- mysql2 turns `VALUES ?` + {{1,2},{3,4}} into
+                    -- `VALUES (1,2),(3,4)`. Emit grouped placeholders.
+                    local groups = {}
+                    for gi = 1, n do
+                        local row = v[gi]
+                        local inner = {}
+                        for k = 1, #row do
+                            inner[k] = '?'
+                            flat[#flat + 1] = row[k]
+                        end
+                        groups[gi] = '(' .. table.concat(inner, ',') .. ')'
+                    end
+                    out[#out + 1] = table.concat(groups, ',')
                 else
+                    -- Flat array bound to one `?`: IN-list expansion.
                     local placeholders = {}
                     for j = 1, n do
                         placeholders[j] = '?'
@@ -166,12 +182,26 @@ local SELECT_LIKE = {
 -- number value" (nteam-nitro). Mirror the object shape; also keep the
 -- spacedb-native keys (rowsAffected, lastInsertId) so anything that
 -- already learned to read those keeps working.
+-- Full mysql2 OkPacket/ResultSetHeader shape. Real oxmysql returns the raw
+-- mysql2 result for writes, so resources may read any of these fields
+-- (e.g. esx_property reads .affectedRows, some read .changedRows /
+-- .warningStatus / .info). The Go core only reports rowsAffected +
+-- lastInsertId; Go's database/sql RowsAffected() already returns CHANGED
+-- rows for MySQL, so changedRows == affectedRows here. warningStatus/info
+-- aren't surfaced by the driver, so they default to 0 / ''.
 local function writeShape(result)
     local affected = result and (result.rowsAffected or result.affectedRows) or 0
     local insertId = result and (result.lastInsertId or result.insertId) or 0
     return {
+        fieldCount    = 0,
         affectedRows  = affected,
         insertId      = insertId,
+        info          = '',
+        serverStatus  = 2,
+        warningStatus = 0,
+        changedRows   = affected,
+        -- spacedb-native aliases kept for back-compat with code that
+        -- learned to read these before the shim matched oxmysql.
         rowsAffected  = affected,
         lastInsertId  = insertId,
     }
@@ -343,14 +373,32 @@ local function rawExecute(sql, rows, cb)
         if verb == 'SELECT' or verb == 'SHOW' or verb == 'WITH' then
             return callbackOrReturn(exports.spacedb:query(sqlOut, set) or {}, cb)
         end
-        local r = exports.spacedb:execute(sqlOut, set)
-        return callbackOrReturn({
-            affectedRows = r and (r.rowsAffected or r.affectedRows) or 0,
-            insertId     = r and (r.lastInsertId or r.insertId) or 0,
-        }, cb)
+        return callbackOrReturn(writeShape(exports.spacedb:execute(sqlOut, set)), cb)
     end
     local result = exports.spacedb:executeMany(sqlOut, sets)
     return callbackOrReturn(result, cb)
+end
+
+-- Interactive transaction. oxmysql passes the callback a single
+-- `query(sql, values)` runner and commits on a truthy return. spacedb has
+-- no interactive cursor, so statements run live (dependent insertId chains
+-- work); cross-statement atomic rollback is NOT guaranteed here — use
+-- :transaction for that.
+local function startTransaction(cb)
+    if type(cb) ~= 'function' then return false end
+    local function run(sql, values)
+        local s, p = preprocess(sql, values or {})
+        if SELECT_LIKE[sqlVerb(s)] then
+            return exports.spacedb:query(s, p) or {}
+        end
+        return writeShape(exports.spacedb:execute(s, p))
+    end
+    local ok, commit = pcall(cb, run)
+    if not ok then
+        print(('[oxmysql shim] startTransaction callback errored: %s'):format(tostring(commit)))
+        return false
+    end
+    return commit ~= false
 end
 
 -- Deprecated aliases real oxmysql still ships:
@@ -399,3 +447,6 @@ for name, fn in pairs(methods) do
     exports(name .. '_async', fn)
     exports(name .. 'Sync', fn)
 end
+
+-- startTransaction is exported under its bare name only (matches oxmysql).
+exports('startTransaction', startTransaction)

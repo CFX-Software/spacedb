@@ -137,6 +137,21 @@ local function expandArrayParams(sql, params)
                 local n = #v
                 if n == 0 then
                     out[#out + 1] = 'NULL'
+                elseif type(v[1]) == 'table' then
+                    -- Array of arrays bound to one `?`: bulk row tuples.
+                    -- mysql2 turns `VALUES ?` + {{1,2},{3,4}} into
+                    -- `VALUES (1,2),(3,4)`.
+                    local groups = {}
+                    for gi = 1, n do
+                        local row = v[gi]
+                        local inner = {}
+                        for k = 1, #row do
+                            inner[k] = '?'
+                            flat[#flat + 1] = row[k]
+                        end
+                        groups[gi] = '(' .. table.concat(inner, ',') .. ')'
+                    end
+                    out[#out + 1] = table.concat(groups, ',')
                 else
                     local placeholders = {}
                     for j = 1, n do
@@ -154,6 +169,23 @@ local function expandArrayParams(sql, params)
         end
     end
     return table.concat(out), flat
+end
+
+-- Full mysql2 OkPacket shape for write results (see server.lua note).
+local function writeShape(r)
+    local affected = r and (r.rowsAffected or r.affectedRows) or 0
+    local insertId = r and (r.lastInsertId or r.insertId) or 0
+    return {
+        fieldCount    = 0,
+        affectedRows  = affected,
+        insertId      = insertId,
+        info          = '',
+        serverStatus  = 2,
+        warningStatus = 0,
+        changedRows   = affected,
+        rowsAffected  = affected,
+        lastInsertId  = insertId,
+    }
 end
 
 -- Smart-unwraps a single prepare result the way oxmysql does when
@@ -241,8 +273,7 @@ local function runSync(method, query, params)
         local verb = sqlVerb(query)
         if verb ~= 'SELECT' and verb ~= 'SHOW' and verb ~= 'EXPLAIN'
            and verb ~= 'DESCRIBE' and verb ~= 'DESC' and verb ~= 'WITH' then
-            local r = spacedb:execute(query, params or {})
-            return { affectedRows = r and r.rowsAffected or 0, insertId = r and r.lastInsertId or 0 }
+            return writeShape(spacedb:execute(query, params or {}))
         end
         return spacedb:query(query, params) or {}
     elseif method == 'single' or method == 'fetchSingle' then
@@ -365,16 +396,53 @@ MySQL.ready = setmetatable({
 
 function MySQL.awaitConnection() return true end
 
-function MySQL.startTransaction(cb)
-    if type(cb) == 'function' then
-        local handle = {
-            query   = function(_, q, p) return runSync('query', q, p) end,
-            execute = function(_, q, p) return runSync('update', q, p) end,
-            commit  = function() return true end,
-            rollback = function() return false end,
-        }
-        Citizen.CreateThread(function() cb(handle) end)
-    end
+-- Real oxmysql bare exports: execute/fetch alias query, store returns the
+-- SQL as-is. (The Async/Sync.execute namespaces alias `update` — those are
+-- defined above; the top-level MySQL.execute is the query alias.)
+MySQL.execute = MySQL.query
+MySQL.fetch = MySQL.query
+function MySQL.store(query, cb)
+    if type(cb) == 'function' then cb(query); return end
+    return query
 end
+function MySQL.isReady() return true end
+
+-- startTransaction: oxmysql passes the callback a single `query(sql, values)`
+-- runner and commits when it returns true. spacedb has no interactive
+-- cursor, so statements execute live (dependent INSERT->lastInsertId chains
+-- work) rather than being buffered. True atomic rollback across statements
+-- is NOT available here — use MySQL.transaction for guaranteed atomicity.
+function MySQL.startTransaction(cb)
+    if type(cb) ~= 'function' then return false end
+    local function run(sql, values)
+        local verb = sqlVerb(sql)
+        local s, p = translateNamed(sql, values or {})
+        s, p = expandArrayParams(s, p)
+        if verb == 'SELECT' or verb == 'SHOW' or verb == 'WITH'
+           or verb == 'DESCRIBE' or verb == 'DESC' or verb == 'EXPLAIN' then
+            return spacedb:query(s, p) or {}
+        end
+        return writeShape(spacedb:execute(s, p))
+    end
+    local ok, commit = pcall(cb, run)
+    if not ok then
+        print(('[oxmysql shim] startTransaction callback errored: %s'):format(tostring(commit)))
+        return false
+    end
+    return commit ~= false
+end
+
+-- Safety net: unknown MySQL.<x> falls through to the spacedb export of the
+-- same name (mirrors real oxmysql's __index -> exports.oxmysql). Prevents a
+-- hard nil-call error for any method we didn't explicitly define.
+setmetatable(MySQL, {
+    __index = function(_, key)
+        local exp = spacedb[key]
+        if type(exp) == 'function' then
+            return function(...) return exp(spacedb, ...) end
+        end
+        return nil
+    end,
+})
 
 _ENV.MySQL = MySQL

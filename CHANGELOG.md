@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.7
+
+OxMySQL shim: close remaining behavioral gaps vs real oxmysql.
+
+### spacedb-oxmysql
+- **Full result shape on writes.** `query`/`execute`/`update`/`insert`/`rawExecute`/`prepare` write results now return the complete mysql2 OkPacket shape — `affectedRows`, `insertId`, `changedRows`, `warningStatus`, `info`, `serverStatus`, `fieldCount` — instead of just `affectedRows`/`insertId`. Resources that read `.changedRows` or `.warningStatus` no longer get nil. (Go's `database/sql` reports changed-rows as affected, so `changedRows == affectedRows`; `warningStatus`/`info` aren't surfaced by the driver and default to `0`/`''`.) spacedb-native `rowsAffected`/`lastInsertId` aliases retained.
+- **Bulk `VALUES ?` insert.** A single `?` bound to an array-of-arrays (`INSERT INTO t (a,b) VALUES ?` + `{{1,2},{3,4}}`) now expands to grouped tuples `VALUES (?,?),(?,?)`, matching mysql2. Previously it was flattened like an IN-list and bound wrong. Flat IN-list arrays (`IN (?)` + `{1,2,3}`) still expand to `?,?,?` as before.
+- **Interactive `startTransaction`.** Implemented to oxmysql's real signature — the callback receives a `query(sql, values)` runner and commits on a truthy return. Statements execute live so dependent `insertId` chains work. Exported under its bare name. (Note: spacedb has no interactive cursor, so cross-statement atomic rollback is not guaranteed here — use `:transaction` / `MySQL.transaction` for guaranteed atomicity.)
+- **`MySQL.execute`/`fetch`/`store`/`isReady`** top-level aliases added on the shared-script `MySQL` table, plus an `__index` fallthrough so any unknown `MySQL.<method>` routes to the matching `exports.spacedb` export instead of hard-erroring (mirrors oxmysql's `__index -> exports.oxmysql`).
+- Validated against real Lua 5.4: both files parse + 20 behavioral assertions across the exports path and the `@oxmysql/lib/MySQL.lua` shared-script path.
+- Bumps spacedb-oxmysql to 0.2.4.
+
+### Known remaining (needs core support, not shim-fixable)
+- Column type casting (TINYINT(1)→bool, BIGINT, DATE/DATETIME, DECIMAL, JSON) is decided by the spacedb Go core and may differ from mysql2's casting. Tracked for a core change, not addressable in the Lua shim.
+
 ## 0.2.6
 
 OxMySQL shim: correct prepare/rawExecute parameter handling — fixes data corruption.
