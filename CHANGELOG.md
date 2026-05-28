@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.10
+
+Fix the diagnostics version stamp (was always reporting 0.2.0).
+
+### Core
+- `internal/server.Version` was a hardcoded `const "0.2.0"` that nobody bumped, so every `spacelog` diagnostics bundle reported `version: 0.2.0` no matter which binary was actually running — making it impossible to tell whether a server had updated. It is now a build-injected `var` defaulting to `"dev"`.
+- `release.yml` stamps the real git tag into it via `-ldflags "-X .../internal/server.Version=<tag>"`. From this release on, the `version` field in a diagnostics bundle reflects the actual `spacedb-core` binary version (e.g. `v0.2.10`).
+
+### Note on verifying an update
+- The diagnostics `version` field is the **core binary** (`bin/spacedb-core.exe`) version, not the Lua shim. Updating spacedb means replacing BOTH the resource files (server scripts + `compat/spacedb-oxmysql`) AND the `bin/` binary from the release assets. A diag still showing `0.2.0` from a pre-0.2.10 binary does not by itself prove the shim wasn't updated.
+
 ## 0.2.9
 
 OxMySQL shim: tolerate stray params on parameter-less queries.

@@ -42,8 +42,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
+          VERSION: ${{ github.ref_name }}
         run: |
-          go build -trimpath -ldflags="-s -w" -o "${{ matrix.asset }}${{ matrix.ext }}" ./cmd/spacedb-core
+          go build -trimpath \
+            -ldflags="-s -w -X 'github.com/inkwell/spacedb/core/internal/server.Version=${VERSION}'" \
+            -o "${{ matrix.asset }}${{ matrix.ext }}" ./cmd/spacedb-core
           sha256sum "${{ matrix.asset }}${{ matrix.ext }}" > "${{ matrix.asset }}${{ matrix.ext }}.sha256"
       - uses: actions/upload-artifact@v4
         with:

@@ -6,8 +6,12 @@ import (
 	"time"
 )
 
-// Version stamped into the diagnostics bundle. Bumped per release tag.
-const Version = "0.2.0"
+// Version is stamped into the diagnostics bundle. It is injected at build
+// time from the git tag via -ldflags "-X .../internal/server.Version=...".
+// Defaults to "dev" for local/un-stamped builds — do NOT hardcode a release
+// number here (a stale constant previously made every diag report 0.2.0
+// regardless of the binary actually running).
+var Version = "dev"
 
 // errorLog keeps a ring buffer of the most recent SQL errors so users
 // can grab a bundle for bug reports without us having to chase logs.
