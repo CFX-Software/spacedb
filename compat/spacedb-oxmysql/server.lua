@@ -66,17 +66,18 @@ end
 local function expandArrayParams(sql, params)
     if type(params) ~= 'table' then return sql, params end
     if isBatchedParams(params) then return sql, params end
-    local hasArray = false
-    local nParams = #params
-    for i = 1, nParams do
-        if type(params[i]) == 'table' then hasArray = true; break end
-    end
-    -- Count placeholders. If params is fully populated AND no array
-    -- values, nothing to do.
     local _, placeholderCount = sql:gsub('%?', '')
-    if not hasArray and placeholderCount <= nParams then
-        return sql, params
-    end
+    -- No placeholders -> nothing to rebuild.
+    if placeholderCount == 0 then return sql, params end
+    -- We ALWAYS rebuild when there are placeholders. We cannot trust
+    -- `#params` to decide on a fast path: a positional array with an
+    -- interior nil (e.g. AdvancedParking binds `attachedTo or nil` in the
+    -- middle of 18 values) has an undefined length, so a fast-return would
+    -- forward a table with a hole to the core. A hole serializes as a
+    -- malformed/short param set and the core never replies -> 30s timeout
+    -- (op=execute). Walking by index 1..placeholderCount and substituting
+    -- literal NULL for any nil makes the param count exact and hole-free,
+    -- matching oxmysql's parseArguments null-fill.
     local out, flat = {}, {}
     local pIdx = 1
     for i = 1, #sql do

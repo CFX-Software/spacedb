@@ -4,7 +4,7 @@ lua54 'yes'
 
 name 'oxmysql'
 author 'Inkwell'
-version '0.2.4'
+version '0.2.5'
 description 'spacedb oxmysql / mysql-async / ghmattimysql compatibility shim'
 
 dependency 'spacedb'

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.8
+
+OxMySQL shim: fix `op=execute` 30s timeout on positional params with an interior nil.
+
+### spacedb-oxmysql
+- **Critical:** an `insert`/`query`/`update`/`execute` whose positional param list contains a `nil` in the middle (e.g. AdvancedParking's `InsertVehicle` binds `attachedTo and json_encode(attachedTo) or nil` as value 15 of 18) no longer hangs. Lua's `#` operator on a table with an interior hole is undefined, so the previous fast-path forwarded a table with a hole to the core; the hole serialized as a malformed/short parameter set, the core never replied, and the call died with `spacedb timeout after 30000ms op=execute`.
+- `expandArrayParams` now always rebuilds when the SQL has placeholders, walking by index `1..placeholderCount` and substituting literal `NULL` for any nil slot — exact param count, no holes, matching oxmysql's `parseArguments` null-fill. The unreliable `#params`-based fast path is removed.
+- Applied to both the resource-exports path (`server.lua`) and the `@oxmysql/lib/MySQL.lua` shared-script path.
+- Verified with real Lua 5.4 against the 18-placeholder AdvancedParking insert with a nil at index 15: emits 17 `?` + a `NULL` literal, 17 dense params, post-hole values intact.
+- Bumps spacedb-oxmysql to 0.2.5.
+
 ## 0.2.7
 
 OxMySQL shim: close remaining behavioral gaps vs real oxmysql.

@@ -115,15 +115,13 @@ end
 local function expandArrayParams(sql, params)
     if type(params) ~= 'table' then return sql, params end
     if isBatchedParams(params) then return sql, params end
-    local hasArray = false
-    local nParams = #params
-    for i = 1, nParams do
-        if type(params[i]) == 'table' then hasArray = true; break end
-    end
     local _, placeholderCount = sql:gsub('%?', '')
-    if not hasArray and placeholderCount <= nParams then
-        return sql, params
-    end
+    -- Always rebuild when placeholders exist. `#params` is unreliable for a
+    -- positional array with an interior nil (binds like `x or nil` mid-list),
+    -- and forwarding such a hole to the core yields a malformed param set and
+    -- a 30s op=execute timeout. Walking 1..placeholderCount and substituting
+    -- literal NULL for nil keeps the count exact and hole-free.
+    if placeholderCount == 0 then return sql, params end
     local out, flat = {}, {}
     local pIdx = 1
     for i = 1, #sql do
