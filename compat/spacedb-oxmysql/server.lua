@@ -115,12 +115,40 @@ end
 -- Final preprocessing: named -> positional, then array expansion. The
 -- expansion step also substitutes literal NULL for missing-positional
 -- slots so `IN (?)` with no params stays valid (matches real oxmysql
--- parseArguments + mysql2 behavior).
+-- parseArguments + mysql2 behavior). Used by the query/single/scalar/
+-- update/insert path ONLY — never prepare/rawExecute.
 local function preprocess(sql, params)
     params = params or {}
     sql, params = translateNamed(sql, params)
     sql, params = expandArrayParams(sql, params)
     return sql, params
+end
+
+local function countPlaceholders(sql)
+    local _, n = (sql or ''):gsub('%?', '')
+    return n
+end
+
+-- Mirrors oxmysql parseExecute for prepare / rawExecute: params are an
+-- ARRAY OF PARAMETER SETS (one per statement execution), never IN-list
+-- arrays. {a,b} -> {{a,b}}; {{a,b},{c,d}} -> as-is; {{a,b}} -> one set.
+-- Each set is null-padded to the placeholder count. This is the fix for
+-- the ox_inventory corruption where a 1-row prepare batch was mistaken
+-- for an IN-list array and rewritten to `inventory = ?,? WHERE ... = NULL`.
+local function parseExecuteSets(placeholders, params)
+    if type(params) ~= 'table' then return {} end
+    local everyTable, n = true, #params
+    for i = 1, n do
+        if type(params[i]) ~= 'table' then everyTable = false; break end
+    end
+    local sets = (everyTable and n > 0) and params or { params }
+    for i = 1, #sets do
+        local set = sets[i]
+        if type(set) == 'table' then
+            for j = #set + 1, placeholders do set[j] = nil end
+        end
+    end
+    return sets
 end
 
 local SELECT_LIKE = {
@@ -217,44 +245,58 @@ end
 -- The previous shim also supported a (name, sql, params) form. Keep that
 -- shape working for any existing caller, but don't preprocess the name
 -- form's "params" arg since it's actually the SQL string.
+-- Smart-unwrap one prepare result set the way oxmysql does (unpack=true).
+local function prepareUnwrap(verb, sql, set)
+    if verb == 'INSERT' or verb == 'REPLACE' then
+        local r = exports.spacedb:execute(sql, set)
+        return r and (r.lastInsertId or r.insertId) or 0
+    elseif verb == 'UPDATE' or verb == 'DELETE' then
+        local r = exports.spacedb:execute(sql, set)
+        return r and (r.rowsAffected or r.affectedRows) or 0
+    end
+    local rows = exports.spacedb:query(sql, set) or {}
+    if #rows == 0 then return nil end
+    if #rows == 1 then
+        local row = rows[1]
+        local cols, only = 0, nil
+        for _, v in pairs(row) do
+            cols = cols + 1
+            only = v
+            if cols > 1 then return row end
+        end
+        return only
+    end
+    return rows
+end
+
 local function prepare(nameOrSql, sqlOrParams, maybeOptions, maybeCb)
+    -- Legacy (name, sql, params) form some callers used: pass through.
     if type(sqlOrParams) == 'string' then
         local result = exports.spacedb:prepare(nameOrSql, sqlOrParams, maybeOptions or {})
         return callbackOrReturn(result, maybeCb)
     end
 
-    local sql, params = preprocess(nameOrSql, sqlOrParams or {})
+    -- prepare params are parameter SETS (oxmysql parseExecute), NOT
+    -- IN-list arrays. Do named translation on the SQL only, then split
+    -- into sets — never expandArrayParams here.
+    local sql = (translateNamed(nameOrSql, type(sqlOrParams) == 'table' and sqlOrParams or {}))
+    local placeholders = countPlaceholders(sql)
+    local sets = parseExecuteSets(placeholders, sqlOrParams or {})
     local verb = sqlVerb(sql)
+
+    if #sets <= 1 then
+        return callbackOrReturn(prepareUnwrap(verb, sql, sets[1] or {}), maybeOptions)
+    end
     if verb == 'INSERT' or verb == 'REPLACE' then
-        local r
-        if isBatchedParams(params) then
-            r = exports.spacedb:executeMany(sql, params)
-        else
-            r = exports.spacedb:execute(sql, params)
-        end
+        local r = exports.spacedb:executeMany(sql, sets)
         return callbackOrReturn(r and (r.lastInsertId or r.insertId) or 0, maybeOptions)
     elseif verb == 'UPDATE' or verb == 'DELETE' then
-        local r
-        if isBatchedParams(params) then
-            r = exports.spacedb:executeMany(sql, params)
-        else
-            r = exports.spacedb:execute(sql, params)
-        end
+        local r = exports.spacedb:executeMany(sql, sets)
         return callbackOrReturn(r and (r.rowsAffected or r.affectedRows) or 0, maybeOptions)
     end
-    local rows = exports.spacedb:query(sql, params) or {}
-    if #rows == 0 then return callbackOrReturn(nil, maybeOptions) end
-    if #rows == 1 then
-        local row = rows[1]
-        local n, only = 0, nil
-        for _, v in pairs(row) do
-            n = n + 1
-            only = v
-            if n > 1 then return callbackOrReturn(row, maybeOptions) end
-        end
-        return callbackOrReturn(only, maybeOptions)
-    end
-    return callbackOrReturn(rows, maybeOptions)
+    local out = {}
+    for i = 1, #sets do out[i] = prepareUnwrap(verb, sql, sets[i]) end
+    return callbackOrReturn(out, maybeOptions)
 end
 
 local function transaction(queries, paramsOrCb, maybeCb)
@@ -287,27 +329,27 @@ local function transaction(queries, paramsOrCb, maybeCb)
 end
 
 local function rawExecute(sql, rows, cb)
-    -- OxMySQL rawExecute: one SQL, many param sets, batched. On SELECT it
-    -- returns rows like query. Map writes to executeMany; map SELECT to a
-    -- single query against the first param set (rare path — most callers
-    -- use rawExecute for INSERT/UPDATE only).
+    -- OxMySQL rawExecute: one SQL, many param SETS. unpack=false, so it
+    -- returns the raw result(s). Same parseExecute split as prepare; never
+    -- IN-list expansion.
     rows, cb = normalizeParams(rows, cb)
-    if sqlVerb(sql) == 'SELECT' then
-        local first = rows[1] or {}
-        local s, p = preprocess(sql, first)
-        local result = exports.spacedb:query(s, p)
-        return callbackOrReturn(result, cb)
+    local sqlOut = (translateNamed(sql, type(rows) == 'table' and rows or {}))
+    local placeholders = countPlaceholders(sqlOut)
+    local sets = parseExecuteSets(placeholders, rows or {})
+    local verb = sqlVerb(sqlOut)
+
+    if #sets <= 1 then
+        local set = sets[1] or {}
+        if verb == 'SELECT' or verb == 'SHOW' or verb == 'WITH' then
+            return callbackOrReturn(exports.spacedb:query(sqlOut, set) or {}, cb)
+        end
+        local r = exports.spacedb:execute(sqlOut, set)
+        return callbackOrReturn({
+            affectedRows = r and (r.rowsAffected or r.affectedRows) or 0,
+            insertId     = r and (r.lastInsertId or r.insertId) or 0,
+        }, cb)
     end
-    -- For batched writes we cannot rebuild placeholder counts per-row
-    -- (every row must match the same SQL), but we can still translate
-    -- named params on the SQL string against the first row's keys. The
-    -- common case here is positional `?` already, so the no-op fast path
-    -- in translateNamed handles it.
-    local sqlOut = sql
-    if type(rows) == 'table' and rows[1] then
-        sqlOut = (translateNamed(sql, rows[1]))
-    end
-    local result = exports.spacedb:executeMany(sqlOut, rows)
+    local result = exports.spacedb:executeMany(sqlOut, sets)
     return callbackOrReturn(result, cb)
 end
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.6
+
+OxMySQL shim: correct prepare/rawExecute parameter handling — fixes data corruption.
+
+### spacedb-oxmysql
+- **Critical:** `prepare` and `rawExecute` now treat parameters as an array of parameter SETS (oxmysql's `parseExecute` semantics), never as IN-list arrays. Previously a single-row prepare batch like `prepare('UPDATE players SET inventory = ? WHERE citizenid = ?', { { json, citizenid } })` (exactly what ox_inventory sends when saving one inventory) was mistaken for an `IN (?)` array and rewritten to `UPDATE players SET inventory = ?,? WHERE citizenid = NULL`, producing `Error 1064 ... near '? WHERE citizenid = NULL'` and dropping the write. ox_inventory saves now persist correctly.
+- The two pipelines now match real oxmysql exactly:
+  - `query` / `single` / `scalar` / `update` / `insert` / `execute` / `fetch` → single param set; inner arrays expand for `IN (?)`.
+  - `prepare` / `rawExecute` → array of param sets, executed once each (via `executeMany` for multi-row), no array expansion, missing slots null-padded.
+- `prepare` smart-unwrap unchanged for single sets (INSERT → insertId, UPDATE/DELETE → rowsAffected, SELECT → scalar/row/array); multi-set returns an array.
+- `sqlVerb` is now nil-safe for queries that start with `(` or a comment.
+- Applied identically to both the resource-exports path (`server.lua`) and the `@oxmysql/lib/MySQL.lua` shared-script path.
+- Validated against real Lua 5.4 (loadfile parse + 11 behavioral assertions covering the ox_inventory case, IN-list expansion, empty `IN ()`, and return shapes).
+- Bumps spacedb-oxmysql to 0.2.3.
+
+### Not affected
+- `spacedb` core, benchmarks, and other call paths: unchanged. Benchmarks call `exports.spacedb` directly and never touch the shim. `spacedb-oxmysql` is the only compat resource (it also `provide`s mysql-async / ghmattimysql).
+
 ## 0.2.5
 
 Subscription leak on consumer resource restart (issue #16).

@@ -36,8 +36,59 @@ local function translateNamed(sql, params)
 end
 
 -- Returns the leading verb (SELECT, INSERT, etc) of a SQL statement.
+-- nil-safe: queries that start with `(` (wrapped SELECT) or a comment
+-- yield no verb match; return '' rather than erroring on :upper().
 local function sqlVerb(query)
-    return (query or ''):match('^%s*([%a]+)'):upper()
+    local v = (query or ''):match('^%s*([%a]+)')
+    return v and v:upper() or ''
+end
+
+-- Counts real `?` placeholders (oxmysql ignores `??` identifier escapes,
+-- but the Go driver/our callers never use those, so a plain count matches
+-- query.split('?').length - 1 from oxmysql's parseExecute).
+local function countPlaceholders(sql)
+    local _, n = (sql or ''):gsub('%?', '')
+    return n
+end
+
+-- Mirrors oxmysql's parseExecute (used by prepare / rawExecute). Unlike the
+-- query path, prepare params are an ARRAY OF PARAMETER SETS, one set per
+-- statement execution — they are NEVER array-expanded for IN() lists.
+--   {a, b}            -> {{a, b}}              (one set; flat list wrapped)
+--   {{a,b},{c,d}}     -> {{a,b},{c,d}}         (already sets; used as-is)
+--   {{a,b}}           -> {{a,b}}               (one set; NOT IN-expansion)
+-- Each set is padded with nil up to the placeholder count, matching
+-- oxmysql filling missing values with null. This is the fix for the
+-- ox_inventory corruption where a 1-row prepare batch ({{json,cid}}) was
+-- wrongly treated as an IN-list array and rewritten to `inventory = ?,?
+-- WHERE citizenid = NULL`.
+local function parseExecuteSets(placeholders, params)
+    if type(params) ~= 'table' then return {} end
+
+    -- Every element a table -> already an array of sets.
+    local everyTable = true
+    local n = #params
+    for i = 1, n do
+        if type(params[i]) ~= 'table' then everyTable = false; break end
+    end
+    local sets
+    if everyTable and n > 0 then
+        sets = params
+    else
+        -- Flat positional list -> a single set.
+        sets = { params }
+    end
+
+    -- Pad each set up to the placeholder count (oxmysql null-fills).
+    for i = 1, #sets do
+        local set = sets[i]
+        if type(set) == 'table' then
+            for j = #set + 1, placeholders do
+                set[j] = nil
+            end
+        end
+    end
+    return sets
 end
 
 -- True when params is a table of >=2 tables, e.g. {{1,'a'},{2,'b'}} — used
@@ -105,7 +156,81 @@ local function expandArrayParams(sql, params)
     return table.concat(out), flat
 end
 
+-- Smart-unwraps a single prepare result the way oxmysql does when
+-- unpack=true: INSERT/REPLACE -> insertId, UPDATE/DELETE -> rowsAffected,
+-- SELECT zero rows -> nil, 1 row 1 col -> scalar, 1 row N cols -> row,
+-- N rows -> array.
+local function prepareUnwrap(verb, sql, set)
+    if verb == 'INSERT' or verb == 'REPLACE' then
+        local r = spacedb:execute(sql, set)
+        return r and (r.lastInsertId or r.insertId) or 0
+    elseif verb == 'UPDATE' or verb == 'DELETE' then
+        local r = spacedb:execute(sql, set)
+        return r and (r.rowsAffected or r.affectedRows) or 0
+    end
+    local rows = spacedb:query(sql, set) or {}
+    if #rows == 0 then return nil end
+    if #rows == 1 then
+        local row = rows[1]
+        local cols, only = 0, nil
+        for _, v in pairs(row) do
+            cols = cols + 1
+            only = v
+            if cols > 1 then return row end
+        end
+        return only
+    end
+    return rows
+end
+
+-- prepare / rawExecute pipeline. params are parameter SETS (see
+-- parseExecuteSets), executed once each. NO IN-list array expansion.
+local function runExecute(method, query, params)
+    query = (translateNamed(query, type(params) == 'table' and params or {}))
+    local placeholders = countPlaceholders(query)
+    local sets = parseExecuteSets(placeholders, params or {})
+    local verb = sqlVerb(query)
+
+    if method == 'rawExecute' then
+        -- rawExecute returns raw result(s), unpack=false in oxmysql.
+        if #sets <= 1 then
+            local set = sets[1] or {}
+            if verb == 'SELECT' or verb == 'SHOW' or verb == 'WITH' then
+                return spacedb:query(query, set) or {}
+            end
+            local r = spacedb:execute(query, set)
+            return {
+                affectedRows = r and (r.rowsAffected or r.affectedRows) or 0,
+                insertId     = r and (r.lastInsertId or r.insertId) or 0,
+            }
+        end
+        return spacedb:executeMany(query, sets)
+    end
+
+    -- prepare: unpack=true.
+    if #sets <= 1 then
+        return prepareUnwrap(verb, query, sets[1] or {})
+    end
+    -- Multi-set prepare. INSERT/UPDATE/DELETE batch through executeMany;
+    -- SELECT batch loops (rare).
+    if verb == 'INSERT' or verb == 'REPLACE' then
+        local r = spacedb:executeMany(query, sets)
+        return r and (r.lastInsertId or r.insertId) or 0
+    elseif verb == 'UPDATE' or verb == 'DELETE' then
+        local r = spacedb:executeMany(query, sets)
+        return r and (r.rowsAffected or r.affectedRows) or 0
+    end
+    local out = {}
+    for i = 1, #sets do
+        out[i] = prepareUnwrap(verb, query, sets[i])
+    end
+    return out
+end
+
 local function runSync(method, query, params)
+    if method == 'prepare' or method == 'rawExecute' then
+        return runExecute(method, query, params)
+    end
     query, params = translateNamed(query, params or {})
     query, params = expandArrayParams(query, params)
     if method == 'query' or method == 'fetchAll' then
@@ -141,45 +266,6 @@ local function runSync(method, query, params)
             return r and r.rowsAffected or 0
         end
         local r = spacedb:execute(query, params)
-        return r and r.rowsAffected or 0
-    elseif method == 'prepare' then
-        local verb = sqlVerb(query)
-        -- INSERT/UPDATE/DELETE/REPLACE: actually run as execute and
-        -- return the right shape. oxmysql's prepare returns lastInsertId
-        -- for INSERT/REPLACE and rowsAffected for UPDATE/DELETE.
-        if verb == 'INSERT' or verb == 'REPLACE' then
-            if isBatchedParams(params) then
-                local r = spacedb:executeMany(query, params)
-                return r and (r.lastInsertId or r.insertId) or 0
-            end
-            local r = spacedb:execute(query, params)
-            return r and (r.lastInsertId or r.insertId) or 0
-        elseif verb == 'UPDATE' or verb == 'DELETE' then
-            if isBatchedParams(params) then
-                local r = spacedb:executeMany(query, params)
-                return r and r.rowsAffected or 0
-            end
-            local r = spacedb:execute(query, params)
-            return r and r.rowsAffected or 0
-        end
-        -- SELECT path: oxmysql smart-unwraps. Single row single column
-        -- returns the scalar; single row multi-column returns the row;
-        -- multi-row returns the array. Zero rows returns nil.
-        local rows = spacedb:query(query, params or {}) or {}
-        if #rows == 0 then return nil end
-        if #rows == 1 then
-            local row = rows[1]
-            local n, single = 0, nil
-            for _, v in pairs(row) do
-                n = n + 1
-                single = v
-                if n > 1 then return row end
-            end
-            return single
-        end
-        return rows
-    elseif method == 'rawExecute' then
-        local r = spacedb:executeMany(query, params or {})
         return r and r.rowsAffected or 0
     end
 end

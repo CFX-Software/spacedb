@@ -3,7 +3,7 @@ game 'gta5'
 
 author 'Inkwell'
 description 'spacedb - high-performance database bridge for FiveM'
-version '0.2.5'
+version '0.2.6'
 
 server_scripts {
     'server/lua/spacedb.lua',
