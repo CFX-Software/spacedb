@@ -64,6 +64,8 @@ end
 -- WHERE citizenid = NULL`.
 local function parseExecuteSets(placeholders, params)
     if type(params) ~= 'table' then return {} end
+    -- No placeholders -> run once with no params (core rejects extras).
+    if placeholders == 0 then return {} end
 
     -- Every element a table -> already an array of sets.
     local everyTable = true
@@ -116,12 +118,14 @@ local function expandArrayParams(sql, params)
     if type(params) ~= 'table' then return sql, params end
     if isBatchedParams(params) then return sql, params end
     local _, placeholderCount = sql:gsub('%?', '')
+    -- No placeholders: drop any stray params (oxmysql/mysql2 ignore them;
+    -- the strict spacedb core would throw "expected 0 arguments, got N").
+    if placeholderCount == 0 then return sql, {} end
     -- Always rebuild when placeholders exist. `#params` is unreliable for a
     -- positional array with an interior nil (binds like `x or nil` mid-list),
     -- and forwarding such a hole to the core yields a malformed param set and
     -- a 30s op=execute timeout. Walking 1..placeholderCount and substituting
     -- literal NULL for nil keeps the count exact and hole-free.
-    if placeholderCount == 0 then return sql, params end
     local out, flat = {}, {}
     local pIdx = 1
     for i = 1, #sql do

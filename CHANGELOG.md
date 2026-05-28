@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.9
+
+OxMySQL shim: tolerate stray params on parameter-less queries.
+
+### spacedb-oxmysql
+- **Fix `sql: expected 0 arguments, got N`.** A query/execute/prepare whose SQL has no `?` placeholders but is still handed parameters (e.g. kartik-mdt calls `MySQL.query('SELECT COUNT(*) as count FROM mdt_police_reports', { x })`) now drops the stray params before hitting the core. oxmysql/mysql2 silently ignore extra params on a parameter-less statement; the spacedb core is strict and rejected them. Now matches oxmysql.
+- Applied to the query path (`expandArrayParams`) and the prepare/rawExecute path (`parseExecuteSets`), in both `server.lua` and `@oxmysql/lib/MySQL.lua`.
+- Verified with real Lua 5.4 (0-placeholder query/execute/prepare drop params; placeholder-bearing queries still bind).
+- Bumps spacedb-oxmysql to 0.2.6.
+
+### Not a bug (operator note)
+- The recurring `Error 1060 (42S21): Duplicate column name ...` / `Error 1091 ... Can't DROP INDEX` lines from luxu_admin, kartik-*, and mdt are non-idempotent migrations re-running their `ALTER TABLE ADD COLUMN` every boot. Real oxmysql throws the same errors — the column already exists from the first run. spacedb cannot swallow DDL errors without hiding genuine failures. Harmless; ignore or ask those resource authors to guard with `IF NOT EXISTS`.
+
 ## 0.2.8
 
 OxMySQL shim: fix `op=execute` 30s timeout on positional params with an interior nil.

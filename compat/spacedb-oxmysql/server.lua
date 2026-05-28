@@ -67,8 +67,11 @@ local function expandArrayParams(sql, params)
     if type(params) ~= 'table' then return sql, params end
     if isBatchedParams(params) then return sql, params end
     local _, placeholderCount = sql:gsub('%?', '')
-    -- No placeholders -> nothing to rebuild.
-    if placeholderCount == 0 then return sql, params end
+    -- No placeholders: oxmysql/mysql2 silently ignore any params passed to
+    -- a parameter-less query (e.g. kartik-mdt does
+    -- `query('SELECT COUNT(*) ... ', { x })`). The spacedb core is strict
+    -- and rejects extras with "expected 0 arguments, got N", so drop them.
+    if placeholderCount == 0 then return sql, {} end
     -- We ALWAYS rebuild when there are placeholders. We cannot trust
     -- `#params` to decide on a fast path: a positional array with an
     -- interior nil (e.g. AdvancedParking binds `attachedTo or nil` in the
@@ -154,6 +157,8 @@ end
 -- for an IN-list array and rewritten to `inventory = ?,? WHERE ... = NULL`.
 local function parseExecuteSets(placeholders, params)
     if type(params) ~= 'table' then return {} end
+    -- No placeholders -> run once with no params (core rejects extras).
+    if placeholders == 0 then return {} end
     local everyTable, n = true, #params
     for i = 1, n do
         if type(params[i]) ~= 'table' then everyTable = false; break end
